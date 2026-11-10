@@ -27,3 +27,15 @@ export function policyFlag({ category, amount, spent_on }) {
   if (spent_on > todayISO()) flags.push('Date is in the future');
   return flags.length ? flags.join('; ') : null;
 }
+
+// Issue types a reviewer (usually Claude, sometimes a person) can flag on a report.
+// The app stores and shows flags; it never decides them itself.
+export const FLAG_KINDS = {
+  overspend: 'Overspending',
+  date_mismatch: 'Date mismatch',
+  amount_mismatch: 'Amount mismatch',
+  duplicate: 'Possible duplicate',
+  missing_receipt: 'Missing receipt',
+  personal: 'Looks personal',
+  other: 'Other',
+};

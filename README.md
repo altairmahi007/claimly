@@ -10,8 +10,9 @@ Claimly does everything else: it stores the report, checks policy, routes it to 
 | Arjun Menon | arjun@claimly.demo | Employee, **UI** (manager: Ria) | Own reports and own spend |
 | Neha Iyer | neha@claimly.demo | Employee, **Backend** (manager: Ria) | Own reports and own spend |
 | Karan Patel | karan@claimly.demo | Employee, **Middleware** (manager: Vikram) | Own reports and own spend |
-| Ria Sharma | ria@claimly.demo | Manager of UI + Backend | Arjun's and Neha's reports (approve, reject, correct); spend **by department and by reportee**. **Cannot** see Middleware or Karan. |
-| Vikram Rao | vikram@claimly.demo | Manager of Middleware | Karan only |
+| Divya Nair | divya@claimly.demo | Employee, **Middleware** (manager: Vikram) | Own reports and own spend |
+| Ria Sharma | ria@claimly.demo | Manager of UI + Backend | Arjun's and Neha's **submitted** reports (approve, reject, correct, flag, discuss); spend **by department and by reportee**. **Cannot** see drafts, Middleware, Karan or Divya. |
+| Vikram Rao | vikram@claimly.demo | Manager of Middleware | Karan's and Divya's submitted reports |
 | Ashish Verma | ashish@claimly.demo | Finance | **Department-level totals only** across the company. **Cannot** see individual people or reports. |
 
 The guardrails live in `src/access.js`. The web app and the MCP tools both call the same functions, so a prompt in Claude can't get around them.
@@ -50,7 +51,7 @@ DATABASE_URL="postgresql://..." SESSION_SECRET="dev" npm start   # http://localh
 ```
 
 ### Guardrail tests
-Against a freshly seeded database, run 68 web + MCP access checks (each role, allowed and denied):
+Against a freshly seeded database, run 92 web + MCP access checks (each role, allowed and denied):
 ```bash
 npm run test:guardrails -- https://<your-app>.onrender.com   # or http://localhost:3000
 ```
@@ -72,14 +73,20 @@ To demo several roles, add a connector for each person (e.g. "Claimly – Arjun"
 | `list_reports`, `get_report` | Read reports within the caller's scope |
 | `submit_report` | Owner sends the report to their manager |
 | `decide_report` | Manager approves or rejects (reason required to reject) |
+| `flag_issue` | Record a problem found in review (date or amount mismatch, duplicate, overspending, missing receipt…), optionally on one line |
+| `resolve_flag` | Manager marks a flag resolved, with a note |
+| `add_comment` | Conversation on a report between the employee and their manager |
 | `get_spend_summary` | Exact totals computed by the app, by category, department, person or month, limited to the caller's scope |
+
+Drafts are private: managers only see a report once it has been submitted. Every report page has a **Flags** section (the app's policy checks plus issues raised in review, often by Claude) and a **Conversation** thread; the approval queue shows both as chips.
 
 Policy checks run in the app on every save: meals over ₹1,500/item, hotels over ₹8,000/night, anything over ₹50,000 (needs finance pre-approval), and future dates.
 
 ## 5-minute demo script
 1. **Arjun (Claude):** paste 3–4 receipts or bank SMS → *"File these as my Pune trip expenses and submit."* → open the link: the report is in the app, tagged **via Claude**, with a policy flag on the expensive dinner.
 2. **Arjun (web):** fix one line in the app. The edit appears in the activity log.
-3. **Ria (Claude):** *"What's waiting for my approval?"* → *"Show my team's spend by department and by person."*
+3. **Ria (Claude):** *"What's waiting for my approval? Flag anything that looks off."* → Claude flags the expensive dinner and asks Arjun about it. Then *"Show my team's spend by department and by person."*
+   **Arjun (Claude):** *"Did Ria ask anything? Tell her the client dinner ran late after landing."* → the reply appears in the report's Conversation.
 4. **Ria (Claude):** *"What did the Middleware team spend?"* → **Access denied** from the app. Then *"Approve Arjun's Pune report."*
 5. **Ashish (Claude):** *"Company spend by department this month"* → works. *"How much did Arjun spend?"* → **Access denied: finance sees department totals only.**
 6. **Ashish (web):** the finance dashboard shows department, category and month totals, with no names.

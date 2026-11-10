@@ -5,9 +5,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { AppError, describeAccess, getTeam, spendSummary } from './access.js';
 import {
-  addExpenses, createReport, decideReport, deleteExpense, getReport, listReports, submitReport, updateExpense,
+  addComment, addExpenses, addFlag, createReport, decideReport, deleteExpense, getReport, listReports, resolveFlag, submitReport, updateExpense,
 } from './repo.js';
-import { CATEGORIES, LIMITS } from './policy.js';
+import { CATEGORIES, FLAG_KINDS, LIMITS } from './policy.js';
 
 const Expense = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('Date of the expense, YYYY-MM-DD'),
@@ -29,6 +29,9 @@ export function buildMcpServer(user, baseUrl) {
         `When the user shares receipts, bank/UPI SMS, card statements or describes spending, extract each expense yourself ` +
         `and save it with create_expense_report or add_expenses. Amounts are INR. Hotel stays: one line per night. ` +
         `Policy limits: meals ₹${LIMITS.mealPerItem}/item, hotels ₹${LIMITS.hotelPerNight}/night, anything over ₹${LIMITS.preApproval} needs finance pre-approval. ` +
+        `When you notice a problem (dates that don't match the receipt or SMS, amounts that differ, possible duplicates, overspending, missing receipts), ` +
+        `record it with flag_issue so it shows in the app; managers should review get_report (policy flags, open flags and the conversation) before approving. ` +
+        `Use add_comment for questions and replies between the employee and their manager. ` +
         `For spend questions always call get_spend_summary instead of adding numbers yourself. ` +
         `Access rules are enforced by the app; if a tool returns "Access denied", explain that to the user and don't try to work around it.`,
     }
@@ -63,6 +66,13 @@ export function buildMcpServer(user, baseUrl) {
       id: e.id, date: e.spent_on, merchant: e.merchant, category: e.category, amount: e.amount, gst: e.gst, notes: e.notes, policy_flag: e.policy_flag,
     })),
     decision: r.decided_by_name ? { by: r.decided_by_name, at: r.decided_at, note: r.decision_note } : null,
+    open_flags: r.open_flags,
+    flags: r.flags.map((f) => ({
+      id: f.id, type: f.kind, label: f.label, message: f.message, expense_id: f.expense_id, line: f.expense_merchant,
+      raised_by: f.raised_by_name, via: f.via, status: f.resolved_at ? 'resolved' : 'open',
+      resolution: f.resolved_at ? { by: f.resolved_by_name, note: f.resolution } : undefined,
+    })),
+    conversation: r.comments.map((c) => ({ from: c.author_name, role: c.author_role, via: c.via, at: c.created_at, message: c.body })),
   });
 
   server.registerTool(
@@ -171,7 +181,9 @@ export function buildMcpServer(user, baseUrl) {
       const rows = await listReports(user, { scope: scope || (user.role === 'manager' ? 'team' : 'mine'), status });
       return reply(`${rows.length} report(s).`, rows.map((r) => ({
         id: r.id, title: r.title, owner: r.owner_name, department: r.department, status: r.status,
-        total_inr: r.total, items: r.items, policy_flags: r.flags, created_via: r.created_via, link: link(r.id),
+        total_inr: r.total, items: r.items, policy_flags: r.flags, open_flags: r.open_flags,
+        flagged_issues: (r.flag_kinds || []).map((k) => FLAG_KINDS[k] || k), comments: r.comments, last_message_from: r.last_commenter,
+        created_via: r.created_via, link: link(r.id),
       })));
     })
   );
@@ -211,8 +223,60 @@ export function buildMcpServer(user, baseUrl) {
       },
     },
     run(async ({ report_id, decision, note }) => {
+      const before = await getReport(user, report_id);
       const status = await decideReport(user, report_id, decision, note, 'claude');
-      return reply(`Report #${report_id} ${status}. ${link(report_id)}`);
+      const warn = before.open_flags ? ` Note: ${before.open_flags} flag(s) were still open on this report.` : '';
+      return reply(`Report #${report_id} ${status}.${warn} ${link(report_id)}`);
+    })
+  );
+
+  server.registerTool(
+    'flag_issue',
+    {
+      title: 'Flag an issue on a report',
+      description:
+        'Record a problem you found on an expense report so it shows up in the app for the employee and the manager: ' +
+        'e.g. a date that does not match the receipt or bank SMS, an amount mismatch, a possible duplicate, overspending, a missing receipt, or something that looks personal. ' +
+        'Link it to a specific line with expense_id when it is about one line. Works on any report the user can see that is not yet approved.',
+      inputSchema: {
+        report_id: z.number().int(),
+        type: z.enum(Object.keys(FLAG_KINDS)).describe(Object.entries(FLAG_KINDS).map(([k, l]) => `${k} = ${l}`).join('; ')),
+        message: z.string().min(1).max(500).describe('One or two sentences: what looks wrong and why'),
+        expense_id: z.number().int().optional().describe('The expense line this is about, if any'),
+      },
+    },
+    run(async ({ report_id, type, message, expense_id }) => {
+      const id = await addFlag(user, report_id, { kind: type, message, expense_id }, 'claude');
+      return reply(`Flag #${id} (${FLAG_KINDS[type]}) added to report #${report_id}. ${link(report_id)}`);
+    })
+  );
+
+  server.registerTool(
+    'resolve_flag',
+    {
+      title: 'Resolve a flag',
+      description: 'Managers only: mark an open flag on a submitted report from a direct reportee as resolved, with an optional note (e.g. "explained in conversation"). Only do this when the user asks.',
+      inputSchema: { flag_id: z.number().int(), note: z.string().max(500).optional() },
+    },
+    run(async ({ flag_id, note }) => {
+      const reportId = await resolveFlag(user, flag_id, note, 'claude');
+      return reply(`Flag #${flag_id} resolved. ${link(reportId)}`);
+    })
+  );
+
+  server.registerTool(
+    'add_comment',
+    {
+      title: 'Comment on a report',
+      description:
+        'Post a message in the conversation on an expense report, between the employee who filed it and their manager. ' +
+        'Use it for questions ("why is the hotel date different?") and replies ("the invoice is dated at checkout"). ' +
+        "Post the user's own words; don't invent explanations on their behalf.",
+      inputSchema: { report_id: z.number().int(), message: z.string().min(1).max(2000) },
+    },
+    run(async ({ report_id, message }) => {
+      await addComment(user, report_id, message, 'claude');
+      return reply(`Comment posted on report #${report_id}. ${link(report_id)}`);
     })
   );
 

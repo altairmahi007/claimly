@@ -2,7 +2,7 @@
 
 import { q, pool, insertExpense, logActivity } from './db.js';
 import { AppError, loadReportFor } from './access.js';
-import { CATEGORIES, policyFlag } from './policy.js';
+import { CATEGORIES, FLAG_KINDS, policyFlag } from './policy.js';
 
 const inr = (n) => '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
@@ -47,6 +47,7 @@ export async function listReports(user, { scope = 'mine', status } = {}) {
   if (scope === 'team') {
     if (user.role !== 'manager') throw new AppError('Only managers can list team reports.');
     where.push(`u.manager_id = ${p(user.id)}`);
+    where.push(`r.status <> 'draft'`); // drafts stay private to the employee
   } else {
     where.push(`r.owner_id = ${p(user.id)}`);
   }
@@ -54,12 +55,17 @@ export async function listReports(user, { scope = 'mine', status } = {}) {
   const { rows } = await q(
     `SELECT r.id, r.title, r.status, r.created_via, r.created_at, r.submitted_at,
             u.name AS owner_name, u.department,
-            COALESCE(SUM(e.amount), 0) AS total, COUNT(e.id)::int AS items, COUNT(e.policy_flag)::int AS flags
+            COALESCE((SELECT SUM(e.amount) FROM expenses e WHERE e.report_id = r.id), 0) AS total,
+            (SELECT COUNT(*)::int FROM expenses e WHERE e.report_id = r.id) AS items,
+            (SELECT COUNT(*)::int FROM expenses e WHERE e.report_id = r.id AND e.policy_flag IS NOT NULL) AS flags,
+            (SELECT COUNT(*)::int FROM flags f WHERE f.report_id = r.id AND f.resolved_at IS NULL) AS open_flags,
+            COALESCE((SELECT array_agg(DISTINCT f.kind) FROM flags f WHERE f.report_id = r.id AND f.resolved_at IS NULL), '{}') AS flag_kinds,
+            (SELECT COUNT(*)::int FROM comments c WHERE c.report_id = r.id) AS comments,
+            (SELECT cu.name FROM comments c JOIN users cu ON cu.id = c.author_id
+              WHERE c.report_id = r.id ORDER BY c.created_at DESC, c.id DESC LIMIT 1) AS last_commenter
        FROM reports r
        JOIN users u ON u.id = r.owner_id
-       LEFT JOIN expenses e ON e.report_id = r.id
       WHERE ${where.join(' AND ')}
-      GROUP BY r.id, u.name, u.department
       ORDER BY (r.status = 'submitted') DESC, r.created_at DESC`,
     params
   );
@@ -77,6 +83,20 @@ export async function getReport(user, id) {
   r.total = Math.round(r.expenses.reduce((s, e) => s + e.amount, 0) * 100) / 100;
   r.gst_total = Math.round(r.expenses.reduce((s, e) => s + e.gst, 0) * 100) / 100;
   r.flag_count = r.expenses.filter((e) => e.policy_flag).length;
+  r.flags = (await q(
+    `SELECT f.id, f.expense_id, f.kind, f.message, f.via, f.created_at, f.resolved_at, f.resolution,
+            ru.name AS raised_by_name, ru.role AS raised_by_role, xu.name AS resolved_by_name, e.merchant AS expense_merchant
+       FROM flags f LEFT JOIN users ru ON ru.id = f.raised_by LEFT JOIN users xu ON xu.id = f.resolved_by
+       LEFT JOIN expenses e ON e.id = f.expense_id
+      WHERE f.report_id = $1 ORDER BY (f.resolved_at IS NULL) DESC, f.created_at, f.id`,
+    [r.id]
+  )).rows.map((f) => ({ ...f, label: FLAG_KINDS[f.kind] || f.kind }));
+  r.open_flags = r.flags.filter((f) => !f.resolved_at).length;
+  r.comments = (await q(
+    `SELECT c.id, c.body, c.via, c.created_at, u.name AS author_name, u.role AS author_role
+       FROM comments c JOIN users u ON u.id = c.author_id WHERE c.report_id = $1 ORDER BY c.created_at, c.id`,
+    [r.id]
+  )).rows;
   return r;
 }
 
@@ -192,4 +212,58 @@ export async function deleteReport(user, reportId) {
   const r = await loadReportFor(user, reportId);
   if (!r.can.delete) throw new AppError('Only the owner can delete a draft report.');
   await q(`DELETE FROM reports WHERE id = $1`, [r.id]);
+}
+
+// ---------- Flags: issues raised on a report (usually by Claude after checking receipts) ----------
+export async function addFlag(user, reportId, { kind, expense_id, message }, via = 'web') {
+  const r = await loadReportFor(user, reportId);
+  if (!r.can.flag) throw new AppError(`This report is ${r.status}; issues can't be flagged on it any more.`);
+  if (!FLAG_KINDS[kind]) throw new AppError(`Flag type must be one of: ${Object.keys(FLAG_KINDS).join(', ')}.`, 400);
+  const msg = String(message ?? '').trim().slice(0, 500);
+  if (!msg) throw new AppError('Describe the issue in a sentence.', 400);
+  let expenseId = null;
+  if (expense_id !== undefined && expense_id !== null && expense_id !== '') {
+    expenseId = Number(expense_id);
+    const ok = (await q(`SELECT 1 FROM expenses WHERE id = $1 AND report_id = $2`, [expenseId, r.id])).rows.length;
+    if (!ok) throw new AppError(`Expense #${expense_id} is not on this report.`, 400);
+  }
+  return tx(async (client) => {
+    const id = (await client.query(
+      `INSERT INTO flags (report_id, expense_id, kind, message, raised_by, via) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [r.id, expenseId, kind, msg, user.id, via]
+    )).rows[0].id;
+    await logActivity(client, r.id, user.id, via, `Flagged ${FLAG_KINDS[kind]}: ${msg}`);
+    return id;
+  });
+}
+
+export async function resolveFlag(user, flagId, note, via = 'web') {
+  const f = (await q(`SELECT * FROM flags WHERE id = $1`, [Number(flagId)])).rows[0];
+  if (!f) throw new AppError('Flag not found.', 404);
+  const r = await loadReportFor(user, f.report_id);
+  if (!r.can.resolve_flag) throw new AppError('Access denied: only the approving manager can resolve flags, while the report is submitted.');
+  if (f.resolved_at) throw new AppError('This flag is already resolved.', 400);
+  const n = note ? String(note).trim().slice(0, 500) : null;
+  await tx(async (client) => {
+    await client.query(`UPDATE flags SET resolved_by = $2, resolved_at = now(), resolution = $3 WHERE id = $1`, [f.id, user.id, n]);
+    await logActivity(client, r.id, user.id, via, `Resolved flag "${FLAG_KINDS[f.kind] || f.kind}"${n ? `: ${n}` : ''}`);
+  });
+  return r.id;
+}
+
+// ---------- Conversation between the employee and their manager ----------
+export async function addComment(user, reportId, body, via = 'web') {
+  const r = await loadReportFor(user, reportId);
+  if (!r.can.comment) throw new AppError("You can't comment on this report.");
+  const text = String(body ?? '').trim().slice(0, 2000);
+  if (!text) throw new AppError('Comment is empty.', 400);
+  return tx(async (client) => {
+    const id = (await client.query(
+      `INSERT INTO comments (report_id, author_id, body, via) VALUES ($1,$2,$3,$4) RETURNING id`,
+      [r.id, user.id, text, via]
+    )).rows[0].id;
+    await logActivity(client, r.id, user.id, via, 'Commented');
+    await touch(client, r.id);
+    return id;
+  });
 }

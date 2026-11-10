@@ -31,9 +31,10 @@ export function describeAccess(user, team = []) {
   return 'You can see department-level spend totals across the company. Individual reports and per-person spend are hidden from Finance by design.';
 }
 
-function relation(user, ownerId, ownerManagerId) {
+// Managers see a reportee's report only once it has been submitted: drafts are private to the employee.
+function relation(user, ownerId, ownerManagerId, status) {
   if (ownerId === user.id) return 'owner';
-  if (user.role === 'manager' && ownerManagerId === user.id) return 'manager';
+  if (user.role === 'manager' && ownerManagerId === user.id && status !== 'draft') return 'manager';
   return null;
 }
 
@@ -50,11 +51,11 @@ export async function loadReportFor(user, reportId) {
   )).rows[0];
   if (!r) throw new AppError('Report not found.', 404);
 
-  const rel = relation(user, r.owner_id, r.owner_manager_id);
+  const rel = relation(user, r.owner_id, r.owner_manager_id, r.status);
   if (!rel) {
     if (user.role === 'finance') throw new AppError('Finance can only see department-level totals, not individual expense reports.');
-    // Don't reveal whose report it is: the owner's name and department are outside this manager's scope.
-    if (user.role === 'manager') throw new AppError('Access denied: this report is not from one of your direct reportees. Managers can only see their own team\'s reports.');
+    // Same message for another team's report and a reportee's draft: reveal neither whose it is nor that it exists.
+    if (user.role === 'manager') throw new AppError('Access denied: managers can only see reports that their direct reportees have submitted.');
     throw new AppError('You can only see your own expense reports.');
   }
   r.rel = rel;
@@ -63,6 +64,9 @@ export async function loadReportFor(user, reportId) {
     submit: rel === 'owner' && ['draft', 'rejected'].includes(r.status),
     decide: rel === 'manager' && r.status === 'submitted',
     delete: rel === 'owner' && r.status === 'draft',
+    comment: true,
+    flag: r.status !== 'approved',
+    resolve_flag: rel === 'manager' && r.status === 'submitted',
   };
   return r;
 }

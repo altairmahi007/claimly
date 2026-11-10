@@ -1,4 +1,4 @@
-import { CATEGORIES, LIMITS } from './policy.js';
+import { CATEGORIES, FLAG_KINDS, LIMITS } from './policy.js';
 
 export const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -43,6 +43,13 @@ td input,td select{padding:4px 6px}
 .login{max-width:900px;margin:40px auto;display:grid;grid-template-columns:1fr 1.2fr;gap:24px}
 @media(max-width:760px){.login{grid-template-columns:1fr}nav{display:none}}
 ol li{margin-bottom:6px}.log li{margin-bottom:6px;font-size:13px}
+.chips{display:flex;flex-wrap:wrap;gap:4px}.chip{font-size:12px;border-radius:6px;padding:1px 7px;background:#eef0f6;color:#445;white-space:nowrap}
+.chip.warn{background:#fff1e0;color:#a14d00}.chip.ai{background:#efe7ff;color:#5b2fc9}.chip.talk{background:#e6f1ff;color:#1d4f91}
+.issue{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid #f0f1f6}.issue:last-child{border-bottom:0}.issue .body{flex:1}
+.issue.done{opacity:.6}.issue .k{font-weight:700}
+.msg{padding:10px 12px;border-radius:10px;margin-bottom:10px;background:#f6f7fb;border:1px solid #e6e8f0}.msg.mgr{background:#f0f2ff;border-color:#d8ddff}
+.msg .who{font-size:13px;margin-bottom:4px}.msg .text{white-space:pre-wrap}
+textarea{min-height:70px;resize:vertical}
 `;
 
 export function layout({ title, user, body, flash, error }) {
@@ -81,11 +88,20 @@ ${sum.rows.map((r) => `<tr><td>${esc(r.group)}</td><td class="n">${inr(r.approve
 </tbody><tfoot><tr><td>Total</td><td class="n">${inr(sum.totals.approved)}</td><td class="n">${inr(sum.totals.pending)}</td><td class="n">${inr(sum.totals.total)}</td></tr></tfoot></table>`;
 }
 
+// Chips that tell a reviewer, at a glance, what needs attention on a report.
+export function reviewChips(r) {
+  const chips = [];
+  if (r.flags) chips.push(`<span class="chip warn" title="Lines over company policy limits (checked by the app)">⚠ ${r.flags} policy</span>`);
+  for (const k of r.flag_kinds || []) chips.push(`<span class="chip ai" title="Raised during review, e.g. by Claude">🔎 ${esc(FLAG_KINDS[k] || k)}</span>`);
+  if (r.comments) chips.push(`<span class="chip talk" title="Last message from ${esc(r.last_commenter || '')}">💬 ${r.comments} · last: ${esc((r.last_commenter || '').split(' ')[0])}</span>`);
+  return chips.length ? `<div class="chips">${chips.join('')}</div>` : '<span class="muted">—</span>';
+}
+
 export function reportsTable(rows, { showOwner = false, empty = 'No reports yet.' } = {}) {
   if (!rows.length) return `<p class="muted">${esc(empty)}</p>`;
-  return `<table><thead><tr><th>Report</th>${showOwner ? '<th>Employee</th>' : ''}<th>Status</th><th class="n">Items</th><th class="n">Total</th></tr></thead><tbody>
-${rows.map((r) => `<tr><td><a href="/reports/${r.id}"><b>${esc(r.title)}</b></a> ${viaBadge(r.created_via)} ${r.flags ? `<span class="flag">⚠ ${r.flags}</span>` : ''}</td>
-${showOwner ? `<td>${esc(r.owner_name)}<div class="muted">${esc(r.department)}</div></td>` : ''}<td>${badge(r.status)}</td><td class="n">${r.items}</td><td class="n">${inr(r.total)}</td></tr>`).join('')}
+  return `<table><thead><tr><th>Report</th>${showOwner ? '<th>Employee</th>' : ''}<th>Status</th><th>Needs attention</th><th class="n">Items</th><th class="n">Total</th></tr></thead><tbody>
+${rows.map((r) => `<tr><td><a href="/reports/${r.id}"><b>${esc(r.title)}</b></a> ${viaBadge(r.created_via)}</td>
+${showOwner ? `<td>${esc(r.owner_name)}<div class="muted">${esc(r.department)}</div></td>` : ''}<td>${badge(r.status)}</td><td>${reviewChips(r)}</td><td class="n">${r.items}</td><td class="n">${inr(r.total)}</td></tr>`).join('')}
 </tbody></table>`;
 }
 
@@ -111,9 +127,9 @@ export function managerDashboard({ user, team, pending, all, byDept, byPerson, p
   return layout({
     title: 'Team dashboard', user, flash, error,
     body: `<h1>Team spend</h1><p class="sub">${esc(user.title || '')}</p>
-<div class="guard">🔒 You see only your direct reportees: <b>${esc(team.map((t) => `${t.name} (${t.department})`).join(', ') || 'none')}</b>. Other departments are hidden.</div>
+<div class="guard">🔒 You see only your direct reportees: <b>${esc(team.map((t) => `${t.name} (${t.department})`).join(', ') || 'none')}</b>, and only reports they have submitted (drafts stay private). Other departments are hidden.</div>
 ${kpis([['Waiting for you', pending.length], ['Approved', inr(byDept.totals.approved)], ['Pending', inr(byDept.totals.pending)], ['Departments', esc(depts.join(', '))]])}
-<div class="card"><h2>Waiting for your approval</h2>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>
+<div class="card"><h2>Waiting for your approval</h2><p class="muted">⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>
 <div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By reportee</h2>${summaryTable(byPerson, 'Person')}</div></div>
@@ -135,6 +151,38 @@ ${kpis([['Approved', inr(byDept.totals.approved)], ['Pending approval', inr(byDe
 }
 
 const catOptions = (sel) => CATEGORIES.map((c) => `<option ${c === sel ? 'selected' : ''}>${esc(c)}</option>`).join('');
+
+const ROLE_LABEL = (role) => ({ manager: 'Manager', employee: 'Employee', finance: 'Finance' }[role] || '');
+const kindOptions = () => Object.entries(FLAG_KINDS).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('');
+
+// Everything that needs a reviewer's attention: the app's policy checks, plus issues raised in review (often by Claude).
+function flagsCard(r) {
+  const policy = r.expenses.filter((e) => e.policy_flag).map((e) => `<div class="issue"><span class="chip warn">⚠ Policy</span>
+<div class="body"><span class="k">${esc(e.policy_flag)}</span><div class="muted">${esc(e.merchant)} · ${inr(e.amount)} · ${esc(e.spent_on)} · checked automatically by Claimly</div></div></div>`);
+  const raised = r.flags.map((f) => `<div class="issue${f.resolved_at ? ' done' : ''}"><span class="chip ai">🔎 ${esc(f.label)}</span>
+<div class="body"><span class="k">${esc(f.message)}</span>
+<div class="muted">${f.expense_merchant ? `Line: ${esc(f.expense_merchant)} · ` : ''}raised by ${esc(f.raised_by_name || 'someone')} ${f.via === 'claude' ? '<span class="badge b-claude">via Claude</span>' : ''} · ${fmtDate(f.created_at)}</div>
+${f.resolved_at ? `<div class="muted">✓ Resolved by ${esc(f.resolved_by_name)}${f.resolution ? `: “${esc(f.resolution)}”` : ''} · ${fmtDate(f.resolved_at)}</div>` : ''}</div>
+${!f.resolved_at && r.can.resolve_flag ? `<form method="post" action="/flags/${f.id}/resolve" class="row" style="max-width:320px"><input name="note" placeholder="Resolution note (optional)"><button class="btn sm g">Resolve</button></form>` : ''}</div>`);
+  const form = r.can.flag
+    ? `<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">+ Flag an issue</summary>
+<form method="post" action="/reports/${r.id}/flags" class="row" style="margin-top:8px"><select name="kind" style="width:170px">${kindOptions()}</select>
+<select name="expense_id" style="width:220px"><option value="">Whole report</option>${r.expenses.map((e) => `<option value="${e.id}">${esc(e.merchant)} (${inr(e.amount)})</option>`).join('')}</select>
+<input name="message" placeholder="What looks wrong?" required style="flex:1;min-width:220px"><button class="btn sm">Flag</button></form></details>`
+    : '';
+  if (!policy.length && !raised.length && !form) return '';
+  return `<div class="card"><h2>Flags ${r.open_flags + r.flag_count ? `<span class="chip warn">${r.open_flags + r.flag_count} need attention</span>` : ''}</h2>
+${policy.length || raised.length ? policy.join('') + raised.join('') : '<p class="muted">No issues flagged.</p>'}${form}</div>`;
+}
+
+function conversationCard(r) {
+  const msgs = r.comments.map((c) => `<div class="msg${c.author_role === 'manager' ? ' mgr' : ''}"><div class="who"><b>${esc(c.author_name)}</b> <span class="muted">${ROLE_LABEL(c.author_role)}</span>
+${c.via === 'claude' ? '<span class="badge b-claude">via Claude</span>' : ''} <span class="muted">· ${fmtDate(c.created_at)}</span></div><div class="text">${esc(c.body)}</div></div>`).join('');
+  return `<div class="card" id="conversation"><h2>Conversation</h2>
+${msgs || `<p class="muted">No messages yet. ${r.rel === 'manager' ? 'Ask the employee about anything that looks off.' : 'Your manager can ask questions here, and you can reply.'}</p>`}
+${r.can.comment ? `<form method="post" action="/reports/${r.id}/comments"><textarea name="body" placeholder="${r.rel === 'manager' ? 'Ask a question or leave a note for the employee…' : 'Reply to your manager…'}" required></textarea>
+<div class="row" style="margin-top:8px"><button class="btn sm p">Post</button></div></form>` : ''}</div>`;
+}
 
 export function reportPage({ user, r, flash, error }) {
   const editable = r.can.edit;
@@ -166,7 +214,7 @@ export function reportPage({ user, r, flash, error }) {
   actions.push(`<a class="btn" href="/reports/${r.id}/export.csv">Export CSV</a>`);
 
   const decide = r.can.decide
-    ? `<div class="card"><h2>Your decision</h2><p class="muted">You can also correct lines above before approving. Policy limits: meals ${inr(LIMITS.mealPerItem)}/item, hotels ${inr(LIMITS.hotelPerNight)}/night.</p>
+    ? `<div class="card"><h2>Your decision</h2>${r.open_flags ? `<div class="alert err">${r.open_flags} open flag${r.open_flags === 1 ? '' : 's'} on this report. Read the flags and the conversation before deciding.</div>` : ''}<p class="muted">You can also correct lines above before approving. Policy limits: meals ${inr(LIMITS.mealPerItem)}/item, hotels ${inr(LIMITS.hotelPerNight)}/night.</p>
 <form method="post" action="/reports/${r.id}/decide" class="row"><input name="note" placeholder="Comment (required to reject)" style="flex:1;min-width:220px">
 <button name="decision" value="approve" class="btn g">Approve ${inr(r.total)}</button><button name="decision" value="reject" class="btn r">Reject</button></form></div>`
     : '';
@@ -177,11 +225,13 @@ export function reportPage({ user, r, flash, error }) {
 <div class="row"><div><h1>${esc(r.title)} ${viaBadge(r.created_via)}</h1>
 <p class="sub">${esc(r.owner_name)} · ${esc(r.owner_department)} · ${badge(r.status)}${r.decided_by_name ? ` by ${esc(r.decided_by_name)}${r.decision_note ? `: “${esc(r.decision_note)}”` : ''}` : ''}</p></div>
 <div class="spacer"></div><div class="row">${actions.join('')}</div></div>
-${kpis([['Total', inr(r.total)], ['GST', inr(r.gst_total)], ['Lines', r.expenses.length], ['Policy flags', r.flag_count ? `<span style="color:#a14d00">⚠ ${r.flag_count}</span>` : '0']])}
+${kpis([['Total', inr(r.total)], ['GST', inr(r.gst_total)], ['Lines', r.expenses.length], ['Needs attention', (r.flag_count + r.open_flags) ? `<span style="color:#a14d00">⚠ ${r.flag_count + r.open_flags}</span>` : '0']])}
 ${r.rel === 'owner' && r.can.edit && r.status === 'draft' ? `<form method="post" action="/reports/${r.id}/rename" class="row" style="margin-bottom:14px"><input name="title" value="${esc(r.title)}" style="max-width:360px"><button class="btn sm">Rename</button></form>` : ''}
 ${r.rel === 'manager' && r.can.edit ? '<div class="guard">You are reviewing as manager: you can correct lines before approving. Changes are logged.</div>' : ''}
+${flagsCard(r)}
 <div class="card"><table><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th class="n">Amount</th><th class="n">GST</th><th>${editable ? 'Notes / policy' : 'Policy'}</th><th></th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7" class="muted">No lines yet.</td></tr>'}${addRow}</tbody></table></div>
+${conversationCard(r)}
 ${decide}
 <div class="card"><h2>Activity</h2><ul class="log">${r.activity.map((a) => `<li><b>${esc(a.actor_name || 'System')}</b> ${a.via === 'claude' ? '<span class="badge b-claude">via Claude</span>' : ''} ${esc(a.action)} <span class="muted">· ${fmtDate(a.at)}</span></li>`).join('')}</ul></div>`,
   });
@@ -199,8 +249,8 @@ export function newReportPage({ user, error }) {
 
 export function connectPage({ user, mcpUrl, flash }) {
   const prompts = {
-    employee: ['Here are my receipts from the Pune trip. File them as an expense report and submit it.', 'How much have I spent on meals this month?'],
-    manager: ['What reports are waiting for my approval?', 'Show my team\'s spend by department and by person.', "What did the Middleware team spend? (you'll see the guardrail block this)"],
+    employee: ['Here are my receipts from the Pune trip. File them as an expense report and submit it.', 'Has my manager asked anything on my reports? Reply that the hotel invoice date is the checkout date.', 'How much have I spent on meals this month?'],
+    manager: ['What reports are waiting for my approval? Check each one and flag anything that looks off.', 'Ask Arjun why the dinner is over the meal limit.', 'Show my team\'s spend by department and by person.', "What did the Middleware team spend? (you'll see the guardrail block this)"],
     finance: ['Show company spend by department for this month.', "How much did Arjun spend? (you'll see the guardrail block this)"],
   }[user.role];
   return layout({

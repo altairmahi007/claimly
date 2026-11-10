@@ -4,7 +4,8 @@ import { initDb, q } from './db.js';
 import { makeSession, newToken, parseCookies, readSession, verifyPassword } from './auth.js';
 import { AppError, getTeam, getUserByEmail, getUserById, getUserByToken, spendSummary } from './access.js';
 import {
-  addExpenses, createReport, decideReport, deleteExpense, deleteReport, getReport, listReports, renameReport, submitReport, updateExpense,
+  addComment, addExpenses, addFlag, createReport, decideReport, deleteExpense, deleteReport, getReport, listReports, renameReport, resolveFlag,
+  submitReport, updateExpense,
 } from './repo.js';
 import { buildMcpServer } from './mcp.js';
 import * as V from './views.js';
@@ -147,6 +148,18 @@ app.post('/reports/:id/decide', requireLogin, h(async (req, res) => {
 app.post('/reports/:id/delete', requireLogin, h(async (req, res) => {
   await deleteReport(req.user, req.params.id);
   back(res, '/', 'Draft deleted.');
+}));
+app.post('/reports/:id/comments', requireLogin, h(async (req, res) => {
+  await addComment(req.user, req.params.id, req.body.body, 'web');
+  back(res, `/reports/${req.params.id}#conversation`, '');
+}));
+app.post('/reports/:id/flags', requireLogin, h(async (req, res) => {
+  await addFlag(req.user, req.params.id, { kind: req.body.kind, expense_id: req.body.expense_id, message: req.body.message }, 'web');
+  back(res, `/reports/${req.params.id}`, 'Issue flagged.');
+}));
+app.post('/flags/:id/resolve', requireLogin, h(async (req, res) => {
+  const reportId = await resolveFlag(req.user, req.params.id, req.body.note, 'web');
+  back(res, `/reports/${reportId}`, 'Flag resolved.');
 }));
 app.get('/reports/:id/export.csv', requireLogin, h(async (req, res) => {
   const r = await getReport(req.user, req.params.id);

@@ -50,19 +50,20 @@ const tool = async (token, name, args = {}) => {
 const denied = (r) => r.isError && /denied|only see|not your direct|Finance can|only managers|can only/i.test(r.text);
 
 const users = {};
-for (const n of ['arjun', 'neha', 'karan', 'ria', 'vikram', 'ashish']) {
+for (const n of ['arjun', 'neha', 'karan', 'divya', 'ria', 'vikram', 'ashish']) {
   const cookie = await login(`${n}@claimly.demo`);
   users[n] = { cookie, token: await mcpToken(cookie) };
 }
-const { arjun, neha, karan, ria, vikram, ashish } = users;
+const { arjun, neha, karan, divya, ria, vikram, ashish } = users;
 // Seed: 1 Arjun Mumbai (submitted), 2 Arjun Figma (approved), 3 Neha AWS (approved),
-//       4 Neha draft, 5 Karan Hyderabad (submitted), 6 Karan Kafka (approved)
+//       4 Neha draft, 5 Karan Hyderabad (submitted), 6 Karan Kafka (approved),
+//       7 Divya Chennai (submitted), 8 Divya Kafka meetup (approved)
 
 console.log('\nMCP handshake');
 const init = await rpc(arjun.token, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
 ok(init.result?.serverInfo?.name === 'claimly', 'initialize returns serverInfo', JSON.stringify(init).slice(0, 200));
 const list = await rpc(arjun.token, 'tools/list', {});
-ok(list.result?.tools?.length === 10, `tools/list returns 10 tools (got ${list.result?.tools?.length})`);
+ok(list.result?.tools?.length === 13, `tools/list returns 13 tools (got ${list.result?.tools?.length})`);
 const bad = await fetch(`${BASE}/mcp/not-a-real-token`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' });
 ok(bad.status === 401, 'invalid MCP token -> 401');
 
@@ -86,10 +87,15 @@ ok(denied(await tool(arjun.token, 'decide_report', { report_id: 1, decision: 'ap
 console.log('\nRia (manager of Arjun + Neha)');
 const riaDash = await web(ria.cookie, '/');
 ok(riaDash.status === 200 && /Arjun/.test(riaDash.text) && /Neha/.test(riaDash.text), 'web: Ria dashboard shows Arjun and Neha');
-ok(!/Karan|Middleware/.test(riaDash.text), 'web: Ria dashboard never mentions Karan or Middleware');
+ok(!/Karan|Divya|Middleware/.test(riaDash.text), 'web: Ria dashboard never mentions Karan, Divya or Middleware');
+ok(!/Database tooling/.test(riaDash.text), 'web: Ria dashboard hides Neha draft');
 ok((await web(ria.cookie, '/reports/1')).status === 200, 'web: Ria opens Arjun report #1');
 ok((await web(ria.cookie, '/reports/3')).status === 200, 'web: Ria opens Neha report #3');
-ok((await web(ria.cookie, '/reports/4')).status === 200, 'web: Ria opens Neha draft #4 (reportee)');
+const riaDraft = await web(ria.cookie, '/reports/4');
+ok(riaDraft.status === 403 && !/Database tooling|Neha/.test(riaDraft.text), 'web: Ria blocked from Neha draft #4, nothing revealed');
+ok(denied(await tool(ria.token, 'get_report', { report_id: 4 })), 'mcp: Ria get_report Neha draft #4 denied');
+ok(denied(await tool(ria.token, 'add_comment', { report_id: 4, message: 'hi' })), 'mcp: Ria cannot comment on Neha draft');
+ok(!/Database tooling/.test((await tool(ria.token, 'list_reports', { scope: 'team', status: 'draft' })).text), 'mcp: Ria list_reports never returns drafts');
 const riaK = await web(ria.cookie, '/reports/5');
 ok(riaK.status === 403, 'web: Ria blocked from Karan report #5');
 ok((await web(ria.cookie, '/reports/5/export.csv')).status === 403, 'web: Ria blocked from Karan CSV export');
@@ -105,14 +111,38 @@ ok(denied(await tool(ria.token, 'get_spend_summary', { person: 'Karan' })), 'mcp
 ok(denied(await tool(ria.token, 'get_spend_summary', { person: 'Karan Patel', group_by: 'person' })), 'mcp: Ria spend for "Karan Patel" denied');
 ok(denied(await tool(ria.token, 'update_expense', { expense_id: 12, amount: 1 })), 'mcp: Ria edit a Karan expense line denied');
 const riaTeam = await tool(ria.token, 'list_reports', { scope: 'team' });
-ok(!riaTeam.isError && /Arjun/.test(riaTeam.text) && !/Karan|Middleware/.test(riaTeam.text), 'mcp: Ria list_reports team = Arjun + Neha only');
+ok(!riaTeam.isError && /Arjun/.test(riaTeam.text) && !/Karan|Divya|Middleware|Database tooling/.test(riaTeam.text), 'mcp: Ria list_reports team = Arjun + Neha only');
 const riaDept = await tool(ria.token, 'get_spend_summary', { group_by: 'department' });
 ok(!riaDept.isError && /"UI"/.test(riaDept.text) && /"Backend"/.test(riaDept.text) && !/Middleware/.test(riaDept.text), 'mcp: Ria spend by department = UI + Backend only');
 const riaPerson = await tool(ria.token, 'get_spend_summary', { group_by: 'person' });
-ok(!riaPerson.isError && /Arjun Menon/.test(riaPerson.text) && /Neha Iyer/.test(riaPerson.text) && !/Karan/.test(riaPerson.text), 'mcp: Ria spend by reportee = Arjun + Neha only');
+ok(!riaPerson.isError && /Arjun Menon/.test(riaPerson.text) && /Neha Iyer/.test(riaPerson.text) && !/Karan|Divya/.test(riaPerson.text), 'mcp: Ria spend by reportee = Arjun + Neha only');
 const riaWho = await tool(ria.token, 'whoami');
-ok(!/Karan|Middleware/.test(riaWho.text), 'mcp: Ria whoami never mentions Karan/Middleware');
+ok(!/Karan|Divya|Middleware/.test(riaWho.text), 'mcp: Ria whoami never mentions Karan/Middleware');
 ok(!(await tool(ria.token, 'update_expense', { expense_id: 2, notes: 'Corrected by manager' })).isError, 'mcp: Ria corrects a line on Arjun submitted report');
+
+console.log('\nFlags and conversation (Ria <-> Arjun on report #1)');
+const fl = await tool(ria.token, 'flag_issue', { report_id: 1, type: 'date_mismatch', expense_id: 5, message: 'Dinner is dated the same day as the outbound flight landing late; please confirm.' });
+ok(!fl.isError && /Flag #\d+/.test(fl.text), 'mcp: Ria flags a date mismatch on Arjun #1', fl.text);
+const flagId = Number((fl.text.match(/Flag #(\d+)/) || [])[1]);
+ok(denied(await tool(karan.token, 'flag_issue', { report_id: 1, type: 'other', message: 'x' })), 'mcp: Karan cannot flag Arjun report');
+ok(denied(await tool(ashish.token, 'flag_issue', { report_id: 1, type: 'other', message: 'x' })), 'mcp: finance cannot flag reports');
+ok((await tool(ria.token, 'flag_issue', { report_id: 1, type: 'other', message: 'x', expense_id: 12 })).isError, 'mcp: flag on a line from another report refused');
+ok(!(await tool(ria.token, 'add_comment', { report_id: 1, message: 'Why is the dinner dated on the travel day?' })).isError, 'mcp: Ria asks a question');
+const arjunR1 = await tool(arjun.token, 'get_report', { report_id: 1 });
+ok(/Date mismatch/.test(arjunR1.text) && /Why is the dinner dated/.test(arjunR1.text), 'mcp: Arjun sees the flag and the question');
+ok(!(await tool(arjun.token, 'add_comment', { report_id: 1, message: 'Client dinner ran late after landing; approve this once please.' })).isError, 'mcp: Arjun replies');
+ok(denied(await tool(neha.token, 'add_comment', { report_id: 1, message: 'x' })), 'mcp: Neha cannot comment on Arjun report');
+ok(denied(await tool(ashish.token, 'add_comment', { report_id: 1, message: 'x' })), 'mcp: finance cannot comment');
+const riaPage1 = await web(ria.cookie, '/reports/1');
+ok(/Date mismatch/.test(riaPage1.text) && /approve this once please/.test(riaPage1.text) && /Meal over/.test(riaPage1.text), 'web: report page shows policy flag, raised flag and conversation');
+const riaDash2 = await web(ria.cookie, '/');
+ok(/🔎 Date mismatch/.test(riaDash2.text) && /💬 2/.test(riaDash2.text), 'web: approval queue shows flag and conversation chips');
+const webC = await form(arjun.cookie, '/reports/1/comments', { body: 'Adding: invoice attached to email.' });
+ok(webC.status === 302, 'web: Arjun replies on the web');
+ok((await form(vikram.cookie, '/reports/1/comments', { body: 'x' })).status === 403, 'web: Vikram cannot comment on Arjun report');
+ok(denied(await tool(arjun.token, 'resolve_flag', { flag_id: flagId })), 'mcp: Arjun cannot resolve flags');
+ok(denied(await tool(vikram.token, 'resolve_flag', { flag_id: flagId })), 'mcp: Vikram cannot resolve Ria team flags');
+ok(!(await tool(ria.token, 'resolve_flag', { flag_id: flagId, note: 'Explained in conversation' })).isError, 'mcp: Ria resolves the flag');
 ok((await tool(ria.token, 'decide_report', { report_id: 1, decision: 'reject' })).isError, 'mcp: reject without reason refused');
 const appr = await tool(ria.token, 'decide_report', { report_id: 1, decision: 'approve' });
 ok(!appr.isError && /approved/.test(appr.text), 'mcp: Ria approves Arjun #1');
@@ -121,15 +151,20 @@ console.log('\nVikram (manager of Karan)');
 ok((await web(vikram.cookie, '/reports/5')).status === 200, 'web: Vikram opens Karan #5');
 ok((await web(vikram.cookie, '/reports/1')).status === 403, 'web: Vikram blocked from Arjun #1');
 ok(denied(await tool(vikram.token, 'get_spend_summary', { department: 'UI' })), 'mcp: Vikram spend for UI denied');
+const vikPerson = await tool(vikram.token, 'get_spend_summary', { group_by: 'person' });
+ok(/Karan Patel/.test(vikPerson.text) && /Divya Nair/.test(vikPerson.text) && !/Arjun|Neha/.test(vikPerson.text), 'mcp: Vikram spend by reportee = Karan + Divya');
+ok((await web(vikram.cookie, '/reports/7')).status === 200, 'web: Vikram opens Divya #7');
+ok(denied(await tool(divya.token, 'get_report', { report_id: 5 })), 'mcp: Divya cannot see Karan report');
+ok(denied(await tool(ria.token, 'get_report', { report_id: 7 })), 'mcp: Ria cannot see Divya report');
 
 console.log('\nAshish (finance): department totals only');
 const ashDash = await web(ashish.cookie, '/');
 ok(ashDash.status === 200 && /Middleware/.test(ashDash.text) && /UI/.test(ashDash.text), 'web: finance dashboard shows department totals');
-ok(!/Arjun|Neha|Karan|Ria|Vikram/.test(ashDash.text), 'web: finance dashboard shows no individual names');
+ok(!/Arjun|Neha|Karan|Divya|Ria|Vikram/.test(ashDash.text), 'web: finance dashboard shows no individual names');
 for (const id of [1, 3, 5]) ok((await web(ashish.cookie, `/reports/${id}`)).status === 403, `web: finance blocked from report #${id}`);
 ok((await web(ashish.cookie, '/reports/1/export.csv')).status === 403, 'web: finance blocked from CSV export');
 const ashDept = await tool(ashish.token, 'get_spend_summary', { group_by: 'department' });
-ok(!ashDept.isError && /Middleware/.test(ashDept.text) && /"UI"/.test(ashDept.text) && !/Arjun|Neha|Karan/.test(ashDept.text), 'mcp: finance spend by department works, no names');
+ok(!ashDept.isError && /Middleware/.test(ashDept.text) && /"UI"/.test(ashDept.text) && !/Arjun|Neha|Karan|Divya/.test(ashDept.text), 'mcp: finance spend by department works, no names');
 ok(denied(await tool(ashish.token, 'get_spend_summary', { group_by: 'person' })), 'mcp: finance spend by person denied');
 ok(denied(await tool(ashish.token, 'get_spend_summary', { person: 'Arjun' })), 'mcp: finance spend for Arjun denied');
 ok(denied(await tool(ashish.token, 'list_reports', {})), 'mcp: finance list_reports denied');
