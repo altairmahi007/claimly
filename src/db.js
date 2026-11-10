@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS reports (
   id            SERIAL PRIMARY KEY,
   owner_id      INTEGER NOT NULL REFERENCES users(id),
   title         TEXT NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','submitted','approved','rejected')),
+  status        TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','submitted','revising','approved','rejected')),
   created_via   TEXT NOT NULL DEFAULT 'web',
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -130,6 +130,9 @@ const seedReport = async (owner, title, status, decider, items) => {
 
 export async function initDb() {
   await q(SCHEMA);
+  // 'revising' = submitted, then reopened by the employee: the manager can see it but not approve it until it is resubmitted.
+  await q(`ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_status_check;
+           ALTER TABLE reports ADD CONSTRAINT reports_status_check CHECK (status IN ('draft','submitted','revising','approved','rejected'))`);
   const { rows } = await q('SELECT COUNT(*)::int AS n FROM users');
   if (rows[0].n === 0) await seedCompany();
   await ensureSecondMiddlewareEngineer();

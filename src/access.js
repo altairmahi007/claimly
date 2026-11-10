@@ -60,9 +60,12 @@ export async function loadReportFor(user, reportId) {
   }
   r.rel = rel;
   r.can = {
-    // Owners can keep editing until the report is approved; managers can correct lines while it waits for them.
-    edit: (rel === 'owner' && r.status !== 'approved') || (rel === 'manager' && r.status === 'submitted'),
-    submit: rel === 'owner' && ['draft', 'rejected'].includes(r.status),
+    // Owners edit drafts, rejected and 'being revised' reports. A submitted report must be reopened first
+    // (start_edit), which moves it to 'revising' so the manager can't approve half-edited data.
+    // Managers can correct lines while a report waits for them. Approved reports are locked for everyone.
+    edit: (rel === 'owner' && ['draft', 'rejected', 'revising'].includes(r.status)) || (rel === 'manager' && r.status === 'submitted'),
+    start_edit: rel === 'owner' && r.status === 'submitted',
+    submit: rel === 'owner' && ['draft', 'rejected', 'revising'].includes(r.status),
     decide: rel === 'manager' && r.status === 'submitted',
     delete: rel === 'owner' && r.status === 'draft',
     comment: true,
@@ -84,12 +87,12 @@ const sameName = (full, asked) => {
   return full.toLowerCase() === a || full.split(' ')[0].toLowerCase() === a;
 };
 
-// Spend summary with role-based scope. Counts submitted (pending) + approved reports.
+// Spend summary with role-based scope. Counts submitted / being revised (pending) + approved reports.
 export async function spendSummary(user, { group_by = 'category', department, person, from, to } = {}) {
   const groupExpr = GROUPS[group_by];
   if (!groupExpr) throw new AppError('group_by must be one of: category, department, person, month.', 400);
 
-  const where = [`r.status IN ('submitted','approved')`];
+  const where = [`r.status IN ('submitted','revising','approved')`];
   const params = [];
   const p = (v) => { params.push(v); return `$${params.length}`; };
   let scope;
@@ -131,7 +134,7 @@ export async function spendSummary(user, { group_by = 'category', department, pe
   const { rows } = await q(
     `SELECT ${groupExpr} AS grp,
             COALESCE(SUM(e.amount) FILTER (WHERE r.status = 'approved'), 0)  AS approved,
-            COALESCE(SUM(e.amount) FILTER (WHERE r.status = 'submitted'), 0) AS pending,
+            COALESCE(SUM(e.amount) FILTER (WHERE r.status IN ('submitted','revising')), 0) AS pending,
             SUM(e.amount) AS total,
             COUNT(*)::int AS items
        FROM expenses e
@@ -151,6 +154,6 @@ export async function spendSummary(user, { group_by = 'category', department, pe
     filters: { department: department || null, person: person || null, from: from || null, to: to || null },
     rows: out,
     totals: { approved: sum('approved'), pending: sum('pending'), total: sum('total'), items: out.reduce((s, r) => s + r.items, 0) },
-    note: 'Amounts in INR. "pending" = submitted and awaiting approval; drafts and rejected reports are excluded.',
+    note: 'Amounts in INR. "pending" = submitted or being revised, awaiting approval; drafts and rejected reports are excluded.',
   };
 }

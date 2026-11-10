@@ -51,7 +51,7 @@ DATABASE_URL="postgresql://..." SESSION_SECRET="dev" npm start   # http://localh
 ```
 
 ### Guardrail tests
-Against a freshly seeded database, run 101 web + MCP access checks (each role, allowed and denied):
+Against a freshly seeded database, run 118 web + MCP access checks (each role, allowed and denied):
 ```bash
 npm run test:guardrails -- https://<your-app>.onrender.com   # or http://localhost:3000
 ```
@@ -69,7 +69,7 @@ To demo several roles, add a connector for each person (e.g. "Claimly – Arjun"
 |---|---|
 | `whoami` | Who is connected, their role, team and exactly what they can access |
 | `create_expense_report` | Claude extracts expense lines from receipts or SMS and saves a report (optionally submits it) |
-| `add_expenses`, `update_expense`, `delete_expense` | Edit lines (owner: until approved; manager: while submitted). Approved reports are locked. |
+| `add_expenses`, `update_expense`, `delete_expense` | Edit lines (owner: until approved; manager: while submitted). An owner editing a submitted report reopens it as **Being revised**. Approved reports are locked. |
 | `list_reports`, `get_report` | Read reports within the caller's scope |
 | `submit_report` | Owner sends the report to their manager |
 | `decide_report` | Manager approves or rejects (reason required to reject) |
@@ -78,7 +78,7 @@ To demo several roles, add a connector for each person (e.g. "Claimly – Arjun"
 | `add_comment` | Conversation on a report between the employee and their manager |
 | `get_spend_summary` | Exact totals computed by the app, by category, department, person or month, limited to the caller's scope |
 
-Drafts are private: managers only see a report once it has been submitted. Every report page has a **Flags** section (the app's policy checks plus issues raised in review, often by Claude) and a **Conversation** thread; the approval queue shows both as chips.
+Drafts are private: managers only see a report once it has been submitted. Reports open read-only with an **Edit** button. If the employee edits a submitted report (on the web or through Claude), it becomes **Being revised**: the manager can still read it and comment, but can't approve or reject it until the employee resubmits. It still counts as pending spend. Every report page has a **Flags** section (the app's policy checks plus issues raised in review, often by Claude) and a **Conversation** thread; the approval queue shows both as chips.
 
 Policy checks run in the app on every save: meals over ₹1,500/item, hotels over ₹8,000/night, anything over ₹50,000 (needs finance pre-approval), and future dates.
 

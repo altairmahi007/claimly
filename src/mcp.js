@@ -38,6 +38,9 @@ export function buildMcpServer(user, baseUrl) {
   );
 
   const link = (id) => `${baseUrl}/reports/${id}`;
+  // After an owner edits a submitted report it is 'revising': tell Claude so it reminds the user to resubmit.
+  const revisingNote = (r) => (r.status === 'revising' && r.rel === 'owner'
+    ? ' The report is now "being revised": your manager can see it but cannot approve it until you resubmit (submit_report).' : '');
   const reply = (text, data) => ({
     content: [{ type: 'text', text: data === undefined ? text : `${text}\n\n${JSON.stringify(data, null, 2)}` }],
   });
@@ -123,13 +126,13 @@ export function buildMcpServer(user, baseUrl) {
     'add_expenses',
     {
       title: 'Add expenses to a report',
-      description: 'Add more expense lines to an existing report. Owners can do this until the report is approved (draft, submitted or rejected).',
+      description: 'Add more expense lines to an existing report. Owners can do this until the report is approved. Editing a submitted report reopens it as "being revised": the manager cannot approve it until the owner resubmits with submit_report.',
       inputSchema: { report_id: z.number().int(), expenses: z.array(Expense).min(1).max(100) },
     },
     run(async ({ report_id, expenses }) => {
       await addExpenses(user, report_id, expenses.map(toRow), 'claude');
       const r = await getReport(user, report_id);
-      return reply(`Added ${expenses.length} expense(s). New total ₹${r.total.toLocaleString('en-IN')}.`, reportView(r));
+      return reply(`Added ${expenses.length} expense(s). New total ₹${r.total.toLocaleString('en-IN')}.${revisingNote(r)}`, reportView(r));
     })
   );
 
@@ -137,7 +140,7 @@ export function buildMcpServer(user, baseUrl) {
     'update_expense',
     {
       title: 'Edit an expense line',
-      description: 'Change fields of one expense line. Owners can edit their report until it is approved (draft, submitted or rejected); managers can correct lines on submitted reports from their reportees. Approved reports are locked.',
+      description: 'Change fields of one expense line. Owners can edit their report until it is approved; editing a submitted report reopens it as "being revised" so the manager cannot approve it until the owner resubmits with submit_report. Managers can correct lines on submitted reports from their reportees. Approved reports are locked.',
       inputSchema: {
         expense_id: z.number().int(),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -149,8 +152,9 @@ export function buildMcpServer(user, baseUrl) {
       },
     },
     run(async ({ expense_id, date, ...rest }) => {
-      await updateExpense(user, expense_id, { spent_on: date, ...rest }, 'claude');
-      return reply(`Expense #${expense_id} updated.`);
+      const reportId = await updateExpense(user, expense_id, { spent_on: date, ...rest }, 'claude');
+      const r = await getReport(user, reportId);
+      return reply(`Expense #${expense_id} updated.${revisingNote(r)} ${link(reportId)}`);
     })
   );
 
@@ -158,12 +162,13 @@ export function buildMcpServer(user, baseUrl) {
     'delete_expense',
     {
       title: 'Remove an expense line',
-      description: 'Remove one expense line from a report the user is allowed to edit.',
+      description: 'Remove one expense line from a report the user is allowed to edit (same rules as update_expense).',
       inputSchema: { expense_id: z.number().int() },
     },
     run(async ({ expense_id }) => {
-      await deleteExpense(user, expense_id, 'claude');
-      return reply(`Expense #${expense_id} removed.`);
+      const reportId = await deleteExpense(user, expense_id, 'claude');
+      const r = await getReport(user, reportId);
+      return reply(`Expense #${expense_id} removed.${revisingNote(r)} ${link(reportId)}`);
     })
   );
 
@@ -174,7 +179,7 @@ export function buildMcpServer(user, baseUrl) {
       description: 'List expense reports. scope "mine" = the user\'s own reports; scope "team" (managers only) = reports from direct reportees. Finance users cannot list individual reports.',
       inputSchema: {
         scope: z.enum(['mine', 'team']).optional(),
-        status: z.enum(['draft', 'submitted', 'approved', 'rejected']).optional(),
+        status: z.enum(['draft', 'submitted', 'revising', 'approved', 'rejected']).optional().describe('revising = reopened by the employee after submitting; not approvable until resubmitted'),
       },
     },
     run(async ({ scope, status }) => {
@@ -202,7 +207,7 @@ export function buildMcpServer(user, baseUrl) {
     'submit_report',
     {
       title: 'Submit report for approval',
-      description: "Submit the user's own draft or rejected report to their manager for approval.",
+      description: "Submit the user's own draft, rejected or being-revised report to their manager for approval (use this to resubmit after editing).",
       inputSchema: { report_id: z.number().int() },
     },
     run(async ({ report_id }) => {

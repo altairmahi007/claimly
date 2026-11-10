@@ -66,7 +66,7 @@ export async function listReports(user, { scope = 'mine', status } = {}) {
        FROM reports r
        JOIN users u ON u.id = r.owner_id
       WHERE ${where.join(' AND ')}
-      ORDER BY (r.status = 'submitted') DESC, r.created_at DESC`,
+      ORDER BY (r.status = 'submitted') DESC, (r.status = 'revising') DESC, r.created_at DESC`,
     params
   );
   return rows;
@@ -116,10 +116,37 @@ export async function createReport(user, { title, expenses = [], via = 'web' }) 
   });
 }
 
-export async function addExpenses(user, reportId, expenses, via = 'web') {
+// Reopen a submitted report for editing: it becomes 'revising', which the manager can see but not approve
+// until the employee resubmits. This is the web "Edit" button, and happens automatically when the owner
+// edits a submitted report through Claude.
+export async function startRevision(user, reportId, via = 'web') {
   const r = await loadReportFor(user, reportId);
-  if (!r.can.edit) throw new AppError(`This report is ${r.status} and can't be edited by you right now.`);
-  const items = expenses.map(validateExpense);
+  if (r.status === 'revising' && r.rel === 'owner') return r.id;
+  if (!r.can.start_edit) throw new AppError(r.status === 'approved' ? 'This report is approved and locked.' : 'Only the employee who filed a submitted report can reopen it for editing.');
+  await tx(async (client) => {
+    await client.query(`UPDATE reports SET status = 'revising', updated_at = now() WHERE id = $1`, [r.id]);
+    await logActivity(client, r.id, user.id, via, 'Reopened for editing (approval paused until resubmitted)');
+  });
+  return r.id;
+}
+
+const notEditable = (r) => new AppError(r.status === 'approved' ? 'This report is approved and locked; it can no longer be edited.' : `This report is ${r.status} and can't be edited by you right now.`);
+
+// Load a report for an edit; an owner editing a submitted report reopens it first.
+async function loadEditable(user, reportId, via) {
+  let r = await loadReportFor(user, reportId);
+  if (r.can.start_edit) {
+    await startRevision(user, r.id, via);
+    r = await loadReportFor(user, r.id);
+  }
+  if (!r.can.edit) throw notEditable(r);
+  return r;
+}
+
+export async function addExpenses(user, reportId, expenses, via = 'web') {
+  const items0 = expenses.map(validateExpense); // validate before reopening anything
+  const r = await loadEditable(user, reportId, via);
+  const items = items0;
   return tx(async (client) => {
     const ids = [];
     for (const e of items) ids.push(await insertExpense(client, r.id, e));
@@ -129,21 +156,20 @@ export async function addExpenses(user, reportId, expenses, via = 'web') {
   });
 }
 
-async function loadExpense(user, expenseId) {
+async function loadExpense(user, expenseId, via) {
   const e = (await q(`SELECT * FROM expenses WHERE id = $1`, [Number(expenseId)])).rows[0];
   if (!e) throw new AppError('Expense not found.', 404);
-  const r = await loadReportFor(user, e.report_id);
-  if (!r.can.edit) throw new AppError(`This report is ${r.status} and can't be edited by you right now.`);
+  const r = await loadEditable(user, e.report_id, via);
   return { e, r };
 }
 
 export async function updateExpense(user, expenseId, fields, via = 'web') {
-  const { e, r } = await loadExpense(user, expenseId);
+  const { e, r } = await loadExpense(user, expenseId, via);
   const merged = validateExpense({ ...e, ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)) });
   const changes = ['spent_on', 'merchant', 'category', 'amount', 'gst', 'notes']
     .filter((k) => String(merged[k] ?? '') !== String(e[k] ?? ''))
     .map((k) => `${k}: ${k === 'amount' || k === 'gst' ? inr(e[k]) : e[k] ?? '—'} → ${k === 'amount' || k === 'gst' ? inr(merged[k]) : merged[k] ?? '—'}`);
-  if (!changes.length) return e.id;
+  if (!changes.length) return r.id;
   return tx(async (client) => {
     await client.query(
       `UPDATE expenses SET spent_on=$2, merchant=$3, category=$4, amount=$5, gst=$6, notes=$7, policy_flag=$8 WHERE id=$1`,
@@ -151,22 +177,24 @@ export async function updateExpense(user, expenseId, fields, via = 'web') {
     );
     await logActivity(client, r.id, user.id, via, `Edited "${e.merchant}" (${changes.join('; ')})`);
     await touch(client, r.id);
-    return e.id;
+    return r.id;
   });
 }
 
 export async function deleteExpense(user, expenseId, via = 'web') {
-  const { e, r } = await loadExpense(user, expenseId);
+  const { e, r } = await loadExpense(user, expenseId, via);
   return tx(async (client) => {
     await client.query(`DELETE FROM expenses WHERE id = $1`, [e.id]);
     await logActivity(client, r.id, user.id, via, `Removed "${e.merchant}" ${inr(e.amount)}`);
     await touch(client, r.id);
   });
+  return r.id;
 }
 
 export async function renameReport(user, reportId, title, via = 'web') {
-  const r = await loadReportFor(user, reportId);
-  if (r.rel !== 'owner' || !r.can.edit) throw new AppError('Only the owner can rename a report, and only until it is approved.');
+  const pre = await loadReportFor(user, reportId);
+  if (pre.rel !== 'owner') throw new AppError('Only the owner can rename a report.');
+  const r = await loadEditable(user, reportId, via);
   const t = String(title ?? '').trim().slice(0, 140);
   if (!t) throw new AppError('Title is required.', 400);
   await tx(async (client) => {
@@ -177,7 +205,7 @@ export async function renameReport(user, reportId, title, via = 'web') {
 
 export async function submitReport(user, reportId, via = 'web') {
   const r = await loadReportFor(user, reportId);
-  if (!r.can.submit) throw new AppError(`Only the owner can submit a draft or rejected report (this one is ${r.status}).`);
+  if (!r.can.submit) throw new AppError(`Only the owner can submit a draft, rejected or being-revised report (this one is ${r.status}).`);
   const n = (await q(`SELECT COUNT(*)::int AS n FROM expenses WHERE report_id = $1`, [r.id])).rows[0].n;
   if (!n) throw new AppError('Add at least one expense before submitting.', 400);
   await tx(async (client) => {
@@ -185,14 +213,16 @@ export async function submitReport(user, reportId, via = 'web') {
       `UPDATE reports SET status='submitted', submitted_at=now(), decided_by=NULL, decided_at=NULL, decision_note=NULL, updated_at=now() WHERE id=$1`,
       [r.id]
     );
-    await logActivity(client, r.id, user.id, via, 'Submitted for approval');
+    await logActivity(client, r.id, user.id, via, r.status === 'draft' ? 'Submitted for approval' : 'Resubmitted for approval');
   });
 }
 
 export async function decideReport(user, reportId, decision, note, via = 'web') {
   const r = await loadReportFor(user, reportId);
   if (!r.can.decide) {
-    throw new AppError(r.rel === 'owner' ? "You can't approve your own report." : `This report is ${r.status}; only submitted reports can be approved or rejected.`);
+    throw new AppError(r.rel === 'owner' ? "You can't approve your own report."
+      : r.status === 'revising' ? `${r.owner_name} is revising this report. It can be approved or rejected once they resubmit it.`
+      : `This report is ${r.status}; only submitted reports can be approved or rejected.`);
   }
   if (!['approve', 'reject'].includes(decision)) throw new AppError('Decision must be "approve" or "reject".', 400);
   const status = decision === 'approve' ? 'approved' : 'rejected';

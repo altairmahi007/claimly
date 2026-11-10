@@ -5,7 +5,7 @@ import { makeSession, newToken, parseCookies, readSession, verifyPassword } from
 import { AppError, getTeam, getUserByEmail, getUserById, getUserByToken, spendSummary } from './access.js';
 import {
   addComment, addExpenses, addFlag, createReport, decideReport, deleteExpense, deleteReport, getReport, listReports, renameReport, resolveFlag,
-  submitReport, updateExpense,
+  startRevision, submitReport, updateExpense,
 } from './repo.js';
 import { buildMcpServer } from './mcp.js';
 import * as V from './views.js';
@@ -108,7 +108,7 @@ app.get('/', requireLogin, h(async (req, res) => {
       spendSummary(user, { group_by: 'department', ...range }),
       spendSummary(user, { group_by: 'person', ...range }),
     ]);
-    const pending = all.filter((r) => r.status === 'submitted');
+    const pending = all.filter((r) => ['submitted', 'revising'].includes(r.status));
     return res.send(V.managerDashboard({ user, team, pending, all, byDept, byPerson, period, flash }));
   }
   const [byDept, byCategory, byMonth] = await Promise.all([
@@ -123,19 +123,24 @@ app.get('/', requireLogin, h(async (req, res) => {
 app.get('/reports/new', requireLogin, (req, res) => res.send(V.newReportPage({ user: req.user })));
 app.post('/reports', requireLogin, h(async (req, res) => {
   const id = await createReport(req.user, { title: req.body.title, expenses: [], via: 'web' });
-  back(res, `/reports/${id}`, 'Draft created. Add your expense lines below.');
+  back(res, `/reports/${id}?edit=1`, 'Draft created. Add your expense lines below.');
 }));
 app.get('/reports/:id', requireLogin, h(async (req, res) => {
   const r = await getReport(req.user, req.params.id);
-  res.send(V.reportPage({ user: req.user, r, flash: req.query.msg }));
+  res.send(V.reportPage({ user: req.user, r, flash: req.query.msg, editMode: req.query.edit === '1' && r.can.edit }));
 }));
 app.post('/reports/:id/expenses', requireLogin, h(async (req, res) => {
   await addExpenses(req.user, req.params.id, [req.body], 'web');
-  back(res, `/reports/${req.params.id}`, 'Line added.');
+  back(res, `/reports/${req.params.id}?edit=1`, 'Line added.');
+}));
+// "Edit" on a submitted report reopens it (status 'revising') so it can't be approved mid-edit.
+app.post('/reports/:id/edit', requireLogin, h(async (req, res) => {
+  await startRevision(req.user, req.params.id, 'web');
+  back(res, `/reports/${req.params.id}?edit=1`, 'Editing. Your manager can see the report but can\'t approve it until you resubmit.');
 }));
 app.post('/reports/:id/rename', requireLogin, h(async (req, res) => {
   await renameReport(req.user, req.params.id, req.body.title, 'web');
-  back(res, `/reports/${req.params.id}`, 'Renamed.');
+  back(res, `/reports/${req.params.id}?edit=1`, 'Renamed.');
 }));
 app.post('/reports/:id/submit', requireLogin, h(async (req, res) => {
   await submitReport(req.user, req.params.id, 'web');
@@ -175,12 +180,12 @@ app.get('/reports/:id/export.csv', requireLogin, h(async (req, res) => {
 app.post('/expenses/:id', requireLogin, h(async (req, res) => {
   const e = (await q('SELECT report_id FROM expenses WHERE id=$1', [Number(req.params.id)])).rows[0];
   await updateExpense(req.user, req.params.id, req.body, 'web');
-  back(res, `/reports/${e ? e.report_id : ''}`, 'Line saved.');
+  back(res, `/reports/${e ? e.report_id : ''}?edit=1`, 'Line saved.');
 }));
 app.post('/expenses/:id/delete', requireLogin, h(async (req, res) => {
   const e = (await q('SELECT report_id FROM expenses WHERE id=$1', [Number(req.params.id)])).rows[0];
   await deleteExpense(req.user, req.params.id, 'web');
-  back(res, `/reports/${e ? e.report_id : ''}`, 'Line removed.');
+  back(res, `/reports/${e ? e.report_id : ''}?edit=1`, 'Line removed.');
 }));
 
 // ---------- Connect Claude ----------

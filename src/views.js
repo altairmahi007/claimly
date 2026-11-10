@@ -5,7 +5,8 @@ export const esc = (s) =>
 export const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 const fmtDate = (d) => (d ? new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : '');
 const ROLE = { employee: 'Employee', manager: 'Manager', finance: 'Finance' };
-const badge = (s) => `<span class="badge b-${esc(s)}">${esc(s)}</span>`;
+const STATUS_LABEL = { revising: 'Being revised' };
+const badge = (s) => `<span class="badge b-${esc(s)}">${esc(STATUS_LABEL[s] || s)}</span>`;
 const viaBadge = (v) => (v === 'claude' ? '<span class="badge b-claude">via Claude</span>' : '');
 
 const CSS = `
@@ -27,7 +28,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;font
 td{padding:8px;border-bottom:1px solid #f0f1f6;vertical-align:middle}tfoot td{font-weight:700;border-top:2px solid #e6e8f0;border-bottom:0}
 td.n,th.n{text-align:right;white-space:nowrap}
 .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;text-transform:capitalize;background:#eef0f6;color:#556}
-.b-submitted{background:#fff4d6;color:#8a5a00}.b-approved{background:#dcf5e6;color:#11683a}.b-rejected{background:#fde2e2;color:#a11d1d}.b-draft{background:#eef0f6;color:#556}
+.b-submitted{background:#fff4d6;color:#8a5a00}.b-approved{background:#dcf5e6;color:#11683a}.b-rejected{background:#fde2e2;color:#a11d1d}.b-draft{background:#eef0f6;color:#556}.b-revising{background:#e6f1ff;color:#1d4f91;text-transform:none}
 .b-claude{background:#efe7ff;color:#5b2fc9;text-transform:none}
 .flag{display:inline-block;font-size:12px;color:#a14d00;background:#fff1e0;border-radius:6px;padding:1px 7px}
 .btn{display:inline-block;border:1px solid #d6d9e6;background:#fff;color:#1c2333;border-radius:8px;padding:7px 14px;font:inherit;font-size:14px;cursor:pointer;text-decoration:none}
@@ -128,8 +129,8 @@ export function managerDashboard({ user, team, pending, all, byDept, byPerson, p
     title: 'Team dashboard', user, flash, error,
     body: `<h1>Team spend</h1><p class="sub">${esc(user.title || '')}</p>
 <div class="guard">🔒 You see only your direct reportees: <b>${esc(team.map((t) => `${t.name} (${t.department})`).join(', ') || 'none')}</b>, and only reports they have submitted (drafts stay private). Other departments are hidden.</div>
-${kpis([['Waiting for you', pending.length], ['Approved', inr(byDept.totals.approved)], ['Pending', inr(byDept.totals.pending)], ['Departments', esc(depts.join(', '))]])}
-<div class="card"><h2>Waiting for your approval</h2><p class="muted">⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>
+${kpis([['Waiting for you', pending.filter((r) => r.status === 'submitted').length], ['Approved', inr(byDept.totals.approved)], ['Pending', inr(byDept.totals.pending)], ['Departments', esc(depts.join(', '))]])}
+<div class="card"><h2>Waiting for your approval</h2><p class="muted">Reports marked <b>Being revised</b> were reopened by the employee: you can read them, but approval waits until they resubmit.<br>⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>
 <div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By reportee</h2>${summaryTable(byPerson, 'Person')}</div></div>
@@ -184,8 +185,22 @@ ${r.can.comment ? `<form method="post" action="/reports/${r.id}/comments"><texta
 <div class="row" style="margin-top:8px"><button class="btn sm p">Post</button></div></form>` : ''}</div>`;
 }
 
-export function reportPage({ user, r, flash, error }) {
-  const editable = r.can.edit;
+// One line under the title explaining where the report stands and who can act next.
+function statusGuard(r) {
+  const first = (n) => esc(String(n || '').split(' ')[0]);
+  if (r.rel === 'owner') {
+    if (r.status === 'submitted') return '<div class="guard">Submitted to your manager. Need a change? Click <b>Edit report</b>: approval pauses until you resubmit.</div>';
+    if (r.status === 'revising') return '<div class="guard">You are revising this report. Your manager can see it but can\'t approve it until you click <b>Resubmit for approval</b>.</div>';
+    if (r.status === 'approved') return '<div class="guard">Approved and locked.</div>';
+  } else if (r.rel === 'manager') {
+    if (r.status === 'revising') return `<div class="guard">${first(r.owner_name)} is revising this report. You can read it and comment; approve or reject unlocks when they resubmit.</div>`;
+  }
+  return '';
+}
+
+export function reportPage({ user, r, flash, error, editMode = false }) {
+  // Every report opens read-only; "Edit" switches to edit mode (and reopens a submitted report first).
+  const editable = r.can.edit && editMode;
   const forms = editable ? r.expenses.map((e) => `<form id="f${e.id}" method="post" action="/expenses/${e.id}"></form>`).join('') : '';
   const rows = r.expenses.map((e) =>
     editable
@@ -209,7 +224,10 @@ export function reportPage({ user, r, flash, error }) {
     : '';
 
   const actions = [];
-  if (r.can.submit) actions.push(`<form method="post" action="/reports/${r.id}/submit"><button class="btn p">Submit for approval</button></form>`);
+  if (editMode) actions.push(`<a class="btn" href="/reports/${r.id}">✓ Done editing</a>`);
+  else if (r.can.start_edit) actions.push(`<form method="post" action="/reports/${r.id}/edit" onsubmit="return confirm('Reopen this report for editing? Your manager can still see it, but can\\'t approve it until you resubmit.')"><button class="btn">✎ Edit report</button></form>`);
+  else if (r.can.edit) actions.push(`<a class="btn" href="/reports/${r.id}?edit=1">✎ ${r.rel === 'manager' ? 'Correct lines' : 'Edit report'}</a>`);
+  if (r.can.submit) actions.push(`<form method="post" action="/reports/${r.id}/submit"><button class="btn p">${r.status === 'draft' ? 'Submit for approval' : 'Resubmit for approval'}</button></form>`);
   if (r.can.delete) actions.push(`<form method="post" action="/reports/${r.id}/delete" onsubmit="return confirm('Delete this draft?')"><button class="btn r">Delete draft</button></form>`);
   actions.push(`<a class="btn" href="/reports/${r.id}/export.csv">Export CSV</a>`);
 
@@ -226,9 +244,9 @@ export function reportPage({ user, r, flash, error }) {
 <p class="sub">${esc(r.owner_name)} · ${esc(r.owner_department)} · ${badge(r.status)}${r.decided_by_name ? ` by ${esc(r.decided_by_name)}${r.decision_note ? `: “${esc(r.decision_note)}”` : ''}` : ''}</p></div>
 <div class="spacer"></div><div class="row">${actions.join('')}</div></div>
 ${kpis([['Total', inr(r.total)], ['GST', inr(r.gst_total)], ['Lines', r.expenses.length], ['Needs attention', (r.flag_count + r.open_flags) ? `<span style="color:#a14d00">⚠ ${r.flag_count + r.open_flags}</span>` : '0']])}
-${r.rel === 'owner' && r.status === 'submitted' ? '<div class="guard">Submitted to your manager. You can still correct it until it is approved; every change is logged.</div>' : ''}
-${r.rel === 'owner' && r.can.edit ? `<form method="post" action="/reports/${r.id}/rename" class="row" style="margin-bottom:14px"><input name="title" value="${esc(r.title)}" style="max-width:360px"><button class="btn sm">Rename</button></form>` : ''}
-${r.rel === 'manager' && r.can.edit ? '<div class="guard">You are reviewing as manager: you can correct lines before approving. Changes are logged.</div>' : ''}
+${statusGuard(r)}
+${editable && r.rel === 'owner' ? `<form method="post" action="/reports/${r.id}/rename" class="row" style="margin-bottom:14px"><input name="title" value="${esc(r.title)}" style="max-width:360px"><button class="btn sm">Rename</button></form>` : ''}
+${editable && r.rel === 'manager' ? '<div class="guard">Correcting lines as manager. Changes are logged and visible to the employee.</div>' : ''}
 ${flagsCard(r)}
 <div class="card"><table><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th class="n">Amount</th><th class="n">GST</th><th>${editable ? 'Notes / policy' : 'Policy'}</th><th></th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7" class="muted">No lines yet.</td></tr>'}${addRow}</tbody></table></div>
