@@ -1,0 +1,162 @@
+// End-to-end guardrail checks against a running Claimly (web + MCP).
+// Usage: node scripts/guardrails-test.mjs [baseUrl]   (default http://localhost:3000)
+// Expects a freshly seeded database (report ids 1-6 from src/db.js seed).
+const BASE = (process.argv[2] || process.env.BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+const PW = process.env.DEMO_PASSWORD || 'demo1234';
+let pass = 0, fail = 0;
+const ok = (cond, name, extra = '') => {
+  if (cond) { pass++; console.log(`  PASS  ${name}`); }
+  else { fail++; console.log(`  FAIL  ${name} ${extra}`); }
+};
+
+async function login(email) {
+  const res = await fetch(`${BASE}/login`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ email, password: PW }),
+  });
+  const cookie = (res.headers.get('set-cookie') || '').split(';')[0];
+  if (!cookie.startsWith('sid=') || cookie === 'sid=') throw new Error(`login failed for ${email}: ${res.status}`);
+  return cookie;
+}
+const web = async (cookie, path, opts = {}) => {
+  const res = await fetch(`${BASE}${path}`, { redirect: 'manual', ...opts, headers: { cookie, ...(opts.headers || {}) } });
+  return { status: res.status, text: await res.text(), location: res.headers.get('location') };
+};
+const form = (cookie, path, data) => web(cookie, path, {
+  method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(data),
+});
+async function mcpToken(cookie) {
+  const { text } = await web(cookie, '/connect');
+  const m = text.match(/\/mcp\/([A-Za-z0-9_-]{20,})/);
+  if (!m) throw new Error('no MCP link on /connect');
+  return m[1];
+}
+let rpcId = 1;
+async function rpc(token, method, params) {
+  const res = await fetch(`${BASE}/mcp/${token}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: rpcId++, method, params }),
+  });
+  const body = await res.text();
+  try { return JSON.parse(body); } catch { throw new Error(`MCP ${method} -> ${res.status}: ${body.slice(0, 300)}`); }
+}
+const tool = async (token, name, args = {}) => {
+  const r = await rpc(token, 'tools/call', { name, arguments: args });
+  if (r.error) return { isError: true, text: `RPC error: ${r.error.message}` };
+  return { isError: !!r.result.isError, text: r.result.content.map((c) => c.text).join('\n') };
+};
+const denied = (r) => r.isError && /denied|only see|not your direct|Finance can|only managers|can only/i.test(r.text);
+
+const users = {};
+for (const n of ['arjun', 'neha', 'karan', 'ria', 'vikram', 'ashish']) {
+  const cookie = await login(`${n}@claimly.demo`);
+  users[n] = { cookie, token: await mcpToken(cookie) };
+}
+const { arjun, neha, karan, ria, vikram, ashish } = users;
+// Seed: 1 Arjun Mumbai (submitted), 2 Arjun Figma (approved), 3 Neha AWS (approved),
+//       4 Neha draft, 5 Karan Hyderabad (submitted), 6 Karan Kafka (approved)
+
+console.log('\nMCP handshake');
+const init = await rpc(arjun.token, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
+ok(init.result?.serverInfo?.name === 'claimly', 'initialize returns serverInfo', JSON.stringify(init).slice(0, 200));
+const list = await rpc(arjun.token, 'tools/list', {});
+ok(list.result?.tools?.length === 10, `tools/list returns 10 tools (got ${list.result?.tools?.length})`);
+const bad = await fetch(`${BASE}/mcp/not-a-real-token`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' });
+ok(bad.status === 401, 'invalid MCP token -> 401');
+
+console.log('\nEmployees: own reports only');
+for (const [who, own, other] of [['arjun', 1, 3], ['neha', 3, 1], ['karan', 5, 1]]) {
+  const u = users[who];
+  ok((await web(u.cookie, `/reports/${own}`)).status === 200, `web: ${who} opens own report #${own}`);
+  ok((await web(u.cookie, `/reports/${other}`)).status === 403, `web: ${who} blocked from report #${other}`);
+  ok(!(await tool(u.token, 'get_report', { report_id: own })).isError, `mcp: ${who} get_report own #${own}`);
+  ok(denied(await tool(u.token, 'get_report', { report_id: other })), `mcp: ${who} get_report #${other} denied`);
+}
+ok(denied(await tool(arjun.token, 'get_spend_summary', { group_by: 'department' })), 'mcp: employee spend by department denied');
+ok(denied(await tool(arjun.token, 'get_spend_summary', { person: 'Neha' })), 'mcp: employee spend for another person denied');
+ok(denied(await tool(arjun.token, 'list_reports', { scope: 'team' })), 'mcp: employee list team reports denied');
+const arjunList = await tool(arjun.token, 'list_reports', {});
+ok(!arjunList.isError && !/Neha|Karan/.test(arjunList.text), 'mcp: arjun list_reports shows only his own');
+const arjunSpend = await tool(arjun.token, 'get_spend_summary', { group_by: 'category' });
+ok(!arjunSpend.isError && /"total": 27990/.test(arjunSpend.text), 'mcp: arjun own spend total = 27990 (submitted + approved)', arjunSpend.text.slice(0, 400));
+ok(denied(await tool(arjun.token, 'decide_report', { report_id: 1, decision: 'approve' })) || (await tool(arjun.token, 'decide_report', { report_id: 1, decision: 'approve' })).isError, 'mcp: arjun cannot approve own report');
+
+console.log('\nRia (manager of Arjun + Neha)');
+const riaDash = await web(ria.cookie, '/');
+ok(riaDash.status === 200 && /Arjun/.test(riaDash.text) && /Neha/.test(riaDash.text), 'web: Ria dashboard shows Arjun and Neha');
+ok(!/Karan|Middleware/.test(riaDash.text), 'web: Ria dashboard never mentions Karan or Middleware');
+ok((await web(ria.cookie, '/reports/1')).status === 200, 'web: Ria opens Arjun report #1');
+ok((await web(ria.cookie, '/reports/3')).status === 200, 'web: Ria opens Neha report #3');
+ok((await web(ria.cookie, '/reports/4')).status === 200, 'web: Ria opens Neha draft #4 (reportee)');
+const riaK = await web(ria.cookie, '/reports/5');
+ok(riaK.status === 403, 'web: Ria blocked from Karan report #5');
+ok((await web(ria.cookie, '/reports/5/export.csv')).status === 403, 'web: Ria blocked from Karan CSV export');
+ok((await form(ria.cookie, '/reports/5/decide', { decision: 'approve' })).status === 403, 'web: Ria cannot approve Karan report #5');
+ok(!/Karan|Middleware/.test(riaK.text), 'web: denial page does not name Karan or Middleware');
+const riaGetK = await tool(ria.token, 'get_report', { report_id: 5 });
+ok(denied(riaGetK), 'mcp: Ria get_report Karan #5 denied');
+ok(!/Karan|Middleware/.test(riaGetK.text), 'mcp: denial message does not name Karan or Middleware', riaGetK.text);
+ok(!/Karan|Middleware/.test((await tool(ria.token, 'update_expense', { expense_id: 12, amount: 1 })).text), 'mcp: line-edit denial does not name Karan');
+ok(denied(await tool(ria.token, 'decide_report', { report_id: 5, decision: 'approve' })), 'mcp: Ria decide Karan #5 denied');
+ok(denied(await tool(ria.token, 'get_spend_summary', { department: 'Middleware' })), 'mcp: Ria spend for Middleware denied');
+ok(denied(await tool(ria.token, 'get_spend_summary', { person: 'Karan' })), 'mcp: Ria spend for Karan denied');
+ok(denied(await tool(ria.token, 'get_spend_summary', { person: 'Karan Patel', group_by: 'person' })), 'mcp: Ria spend for "Karan Patel" denied');
+ok(denied(await tool(ria.token, 'update_expense', { expense_id: 12, amount: 1 })), 'mcp: Ria edit a Karan expense line denied');
+const riaTeam = await tool(ria.token, 'list_reports', { scope: 'team' });
+ok(!riaTeam.isError && /Arjun/.test(riaTeam.text) && !/Karan|Middleware/.test(riaTeam.text), 'mcp: Ria list_reports team = Arjun + Neha only');
+const riaDept = await tool(ria.token, 'get_spend_summary', { group_by: 'department' });
+ok(!riaDept.isError && /"UI"/.test(riaDept.text) && /"Backend"/.test(riaDept.text) && !/Middleware/.test(riaDept.text), 'mcp: Ria spend by department = UI + Backend only');
+const riaPerson = await tool(ria.token, 'get_spend_summary', { group_by: 'person' });
+ok(!riaPerson.isError && /Arjun Menon/.test(riaPerson.text) && /Neha Iyer/.test(riaPerson.text) && !/Karan/.test(riaPerson.text), 'mcp: Ria spend by reportee = Arjun + Neha only');
+const riaWho = await tool(ria.token, 'whoami');
+ok(!/Karan|Middleware/.test(riaWho.text), 'mcp: Ria whoami never mentions Karan/Middleware');
+ok(!(await tool(ria.token, 'update_expense', { expense_id: 2, notes: 'Corrected by manager' })).isError, 'mcp: Ria corrects a line on Arjun submitted report');
+ok((await tool(ria.token, 'decide_report', { report_id: 1, decision: 'reject' })).isError, 'mcp: reject without reason refused');
+const appr = await tool(ria.token, 'decide_report', { report_id: 1, decision: 'approve' });
+ok(!appr.isError && /approved/.test(appr.text), 'mcp: Ria approves Arjun #1');
+
+console.log('\nVikram (manager of Karan)');
+ok((await web(vikram.cookie, '/reports/5')).status === 200, 'web: Vikram opens Karan #5');
+ok((await web(vikram.cookie, '/reports/1')).status === 403, 'web: Vikram blocked from Arjun #1');
+ok(denied(await tool(vikram.token, 'get_spend_summary', { department: 'UI' })), 'mcp: Vikram spend for UI denied');
+
+console.log('\nAshish (finance): department totals only');
+const ashDash = await web(ashish.cookie, '/');
+ok(ashDash.status === 200 && /Middleware/.test(ashDash.text) && /UI/.test(ashDash.text), 'web: finance dashboard shows department totals');
+ok(!/Arjun|Neha|Karan|Ria|Vikram/.test(ashDash.text), 'web: finance dashboard shows no individual names');
+for (const id of [1, 3, 5]) ok((await web(ashish.cookie, `/reports/${id}`)).status === 403, `web: finance blocked from report #${id}`);
+ok((await web(ashish.cookie, '/reports/1/export.csv')).status === 403, 'web: finance blocked from CSV export');
+const ashDept = await tool(ashish.token, 'get_spend_summary', { group_by: 'department' });
+ok(!ashDept.isError && /Middleware/.test(ashDept.text) && /"UI"/.test(ashDept.text) && !/Arjun|Neha|Karan/.test(ashDept.text), 'mcp: finance spend by department works, no names');
+ok(denied(await tool(ashish.token, 'get_spend_summary', { group_by: 'person' })), 'mcp: finance spend by person denied');
+ok(denied(await tool(ashish.token, 'get_spend_summary', { person: 'Arjun' })), 'mcp: finance spend for Arjun denied');
+ok(denied(await tool(ashish.token, 'list_reports', {})), 'mcp: finance list_reports denied');
+ok(denied(await tool(ashish.token, 'get_report', { report_id: 1 })), 'mcp: finance get_report denied');
+ok((await tool(ashish.token, 'create_expense_report', { title: 'x', expenses: [{ date: '2026-11-01', merchant: 'x', category: 'Other', amount: 1 }] })).isError, 'mcp: finance cannot create reports');
+
+console.log('\nClaude creates, a person edits in the app');
+const created = await tool(arjun.token, 'create_expense_report', {
+  title: 'Pune trip', submit: false,
+  expenses: [
+    { date: '2026-11-03', merchant: 'Shatabdi BLR-PUNE', category: 'Travel', amount: 1800 },
+    { date: '2026-11-03', merchant: 'Dinner, Malaka Spice', category: 'Meals', amount: 2400, notes: 'Team dinner' },
+  ],
+});
+const newId = Number((created.text.match(/report #(\d+)/) || [])[1]);
+ok(!created.isError && newId > 0 && /Meal over/.test(created.text), `mcp: arjun creates report #${newId} with a policy flag`, created.text.slice(0, 300));
+const page = await web(arjun.cookie, `/reports/${newId}`);
+ok(page.status === 200 && /via Claude/.test(page.text), 'web: report shows in app tagged via Claude');
+const expId = Number((page.text.match(/action="\/expenses\/(\d+)"/) || [])[1]);
+const edit = await form(arjun.cookie, `/expenses/${expId}`, { spent_on: '2026-11-03', merchant: 'Shatabdi BLR-PUNE', category: 'Travel', amount: '1750', gst: '0', notes: 'fixed' });
+ok(edit.status === 302, `web: arjun edits expense #${expId}`, `${edit.status} ${edit.text.slice(0, 200)}`);
+const after = await tool(arjun.token, 'get_report', { report_id: newId });
+ok(/1750/.test(after.text), 'mcp: Claude sees the web edit');
+ok(denied(await tool(neha.token, 'get_report', { report_id: newId })), 'mcp: Neha cannot see Arjun new report');
+ok((await tool(arjun.token, 'submit_report', { report_id: newId })).isError === false, 'mcp: arjun submits new report');
+ok(!(await tool(ria.token, 'get_report', { report_id: newId })).isError, 'mcp: Ria sees new submitted report');
+ok(denied(await tool(vikram.token, 'get_report', { report_id: newId })), 'mcp: Vikram cannot see it');
+
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

@@ -1,0 +1,21 @@
+{
+  "name": "claimly",
+  "version": "1.0.0",
+  "description": "Claude-native expense claims for small teams. Claude does the reading; Claimly stores, edits, approves and reports. No AI inside.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test:guardrails": "node scripts/guardrails-test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
+    "zod": "^3.25.0"
+  }
+}
