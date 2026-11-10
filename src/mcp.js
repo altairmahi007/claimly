@@ -205,15 +205,20 @@ export function buildMcpServer(user, baseUrl) {
       title: 'List expense reports',
       description: 'List expense reports. scope "mine" = the user\'s own reports; "team" (managers) = direct reportees\' submitted reports; ' +
         '"delegated" (managers) = reports of a manager who is out of office and delegated to you; "finance" (Finance) = reports escalated for second approval. ' +
-        'Each row has days_waiting and, when paid, paid_on.',
+        'Each row has days_waiting and, when paid, paid_on. Results are paged (newest / most urgent first): use offset with the next_offset returned to see more.',
       inputSchema: {
         scope: z.enum(['mine', 'team', 'delegated', 'finance']).optional(),
         status: z.enum(['draft', 'submitted', 'revising', 'finance_review', 'approved', 'rejected']).optional().describe('revising = reopened by the employee; finance_review = approved by the manager, waiting for Finance'),
+        limit: z.number().int().min(1).max(100).optional().describe('Rows per page (default 25, max 100)'),
+        offset: z.number().int().min(0).optional().describe('Rows to skip (default 0)'),
       },
     },
-    run(async ({ scope, status }) => {
-      const rows = await listReports(user, { scope: scope || ({ manager: 'team', finance: 'finance' }[user.role] || 'mine'), status });
-      return reply(`${rows.length} report(s).`, rows.map((r) => ({
+    run(async ({ scope, status, limit = 25, offset = 0 }) => {
+      const all = await listReports(user, { scope: scope || ({ manager: 'team', finance: 'finance' }[user.role] || 'mine'), status });
+      const rows = all.slice(offset, offset + limit);
+      const more = offset + rows.length < all.length;
+      const head = `${all.length} report(s); showing ${all.length ? offset + 1 : 0}-${offset + rows.length}.${more ? ` More available: call again with offset ${offset + rows.length}.` : ''}`;
+      return reply(head, rows.map((r) => ({
         id: r.id, title: r.title, owner: r.owner_name, department: r.department, status: r.status,
         total_inr: r.total, items: r.items, policy_flags: r.flags, open_flags: r.open_flags,
         flagged_issues: (r.flag_kinds || []).map((k) => FLAG_KINDS[k] || k), comments: r.comments, last_message_from: r.last_commenter,

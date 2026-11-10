@@ -118,7 +118,9 @@ app.get('/', requireLogin, h(async (req, res) => {
   const statuses = show;
   const listStatuses = show.length === 2 ? undefined : show; // both on = every report, incl. drafts/rejected
   const bq = /^\d{4}-(01|04|07|10)$/.test(req.query.bq || '') ? req.query.bq : undefined; // budget card quarter (start month)
-  const view = { user, period, show, bq, flash: req.query.msg };
+  // Current query (for pagination links that keep the other filters); only simple string values.
+  const params = Object.fromEntries(Object.entries(req.query).filter(([k, v]) => typeof v === 'string' && k !== 'msg'));
+  const view = { user, period, show, bq, params, flash: req.query.msg };
   if (user.role === 'employee') {
     const [reports, byCategory, totals] = await Promise.all([
       listReports(user, { statuses: listStatuses }),

@@ -377,5 +377,25 @@ ok(!(await tool(arjun.token, 'what_needs_my_attention')).isError, 'mcp: employee
 ok(/user-entered data/.test((await tool(arjun.token, 'get_report', { report_id: ooId })).text), 'mcp: report output marks user text as data, not instructions');
 ok((await web(arjun.cookie, '/policy')).status === 200 && (await web(ria.cookie, '/attention')).status === 200, 'web: policy and attention pages load');
 
+console.log('\nPagination');
+for (let i = 1; i <= 12; i++) {
+  await tool(arjun.token, 'create_expense_report', { title: `Pagination draft ${i}`, expenses: [{ date: '2026-11-02', merchant: `Cab ${i}`, category: 'Local transport', amount: 100 + i }] });
+}
+const arjunAll = await tool(arjun.token, 'list_reports', {});
+const totalMine = Number((arjunAll.text.match(/^(\d+) report\(s\)/) || [])[1]);
+ok(totalMine >= 16, `mcp: Arjun has ${totalMine} reports`);
+const pageA = await web(arjun.cookie, '/');
+ok(new RegExp(`Showing 1–10 of ${totalMine}`).test(pageA.text) && /p_mine=2/.test(pageA.text), 'web: page 1 shows 10 of N with a link to page 2');
+const pageB = await web(arjun.cookie, '/?p_mine=2&period=last_90');
+ok(new RegExp(`Showing 11–${Math.min(20, totalMine)} of`).test(pageB.text) && /‹ Prev/.test(pageB.text), 'web: page 2 shows the next rows and keeps other filters');
+ok(/href="\/\?period=last_90"/.test(pageB.text), 'web: Prev link back to page 1 keeps the period filter');
+ok(/Showing \d+–\d+ of/.test((await web(arjun.cookie, '/?p_mine=999')).text), 'web: out-of-range page falls back to the last page');
+const lp = await tool(arjun.token, 'list_reports', { limit: 5, offset: 5 });
+ok(/showing 6-10\. More available: call again with offset 10/.test(lp.text) && toJson(lp.text).length === 5, 'mcp: list_reports pages with limit/offset', lp.text.split('\n')[0]);
+const lastPage = await tool(arjun.token, 'list_reports', { limit: 25, offset: 25 });
+ok(!/More available/.test(lastPage.text), 'mcp: last page has no "more" hint');
+const riaTeamPage = await web(ria.cookie, '/');
+ok(!/Pagination draft/.test(riaTeamPage.text), 'web: drafts still hidden from the manager');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

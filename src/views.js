@@ -228,6 +228,36 @@ ${c.rows.map((r) => `<tr><td><b>${esc(r.department)}</b></td><td class="n">${r.r
 </tbody></table><p class="muted">Policy breaches are checked by the app (meal, hotel and pre-approval limits, future dates). Review flags are raised during review, often by Claude.</p>`;
 }
 
+// ---------- Pagination (10 per page; each list has its own ?p_<key>= so lists page independently) ----------
+const PAGE_SIZE = 10;
+function paginate(rows, params = {}, key) {
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const page = Math.min(Math.max(1, parseInt(params[`p_${key}`], 10) || 1), pages);
+  return { rows: rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), page, pages, total, key, params };
+}
+function pager(pg) {
+  if (pg.pages <= 1) return '';
+  const href = (n) => {
+    const q = new URLSearchParams(pg.params);
+    if (n > 1) q.set(`p_${pg.key}`, String(n)); else q.delete(`p_${pg.key}`);
+    const s = q.toString();
+    return s ? `/?${s}` : '/';
+  };
+  const nums = [];
+  for (let n = 1; n <= pg.pages; n++) {
+    if (n === 1 || n === pg.pages || Math.abs(n - pg.page) <= 1) nums.push(n);
+    else if (nums[nums.length - 1] !== '…') nums.push('…');
+  }
+  const from = (pg.page - 1) * PAGE_SIZE + 1;
+  const to = Math.min(pg.page * PAGE_SIZE, pg.total);
+  const btn = (n, label, on = false) => `<a class="btn sm${on ? ' p' : ''}" href="${href(n)}"${on ? ' aria-current="page"' : ''}>${label}</a>`;
+  return `<div class="row pager" style="margin-top:12px;gap:6px"><span class="muted" style="font-size:13px">Showing ${from}–${to} of ${pg.total}</span><div class="spacer"></div>
+${pg.page > 1 ? btn(pg.page - 1, '‹ Prev') : ''}${nums.map((n) => (n === '…' ? '<span class="muted">…</span>' : btn(n, n, n === pg.page))).join('')}${pg.page < pg.pages ? btn(pg.page + 1, 'Next ›') : ''}</div>`;
+}
+// A reports table with its pager underneath.
+const pagedReports = (rows, params, key, opts) => { const pg = paginate(rows, params, key); return reportsTable(pg.rows, opts) + pager(pg); };
+
 // ---------- KPIs, out of office, payouts ----------
 function kpiCard(k) {
   const d = (v) => (v == null ? '—' : `${v} d`);
@@ -251,33 +281,34 @@ function outOfOfficeCard(dl) {
   return `<div class="card"><h2>Out of office</h2>${covering}${body}<p class="muted">Your delegate can approve, reject, flag and comment on your team's submitted reports while you are away (logged "on behalf of" you). They don't see your team's spend.</p></div>`;
 }
 
-function payoutCard(p) {
+function payoutCard(p, params = {}) {
+  const pg = paginate(p.unpaid, params, 'pay');
   const today = new Date().toISOString().slice(0, 10);
   const modes = PAYOUT_MODES.map((m) => `<option>${m}</option>`).join('');
-  const rows = p.unpaid.map((x) => `<tr><td><b>#${x.id}</b> ${esc(x.title)}<div class="muted">${esc(x.department)}</div></td><td>${esc(x.payee)}</td><td class="n"><b>${inr(x.amount)}</b></td>
+  const rows = pg.rows.map((x) => `<tr><td><b>#${x.id}</b> ${esc(x.title)}<div class="muted">${esc(x.department)}</div></td><td>${esc(x.payee)}</td><td class="n"><b>${inr(x.amount)}</b></td>
 <td>${esc(x.approved_on)}<div class="muted">${x.days_since_approval}d ago</div></td>
 <td><form method="post" action="/reports/${x.id}/paid" class="row" style="gap:6px;flex-wrap:nowrap"><input type="date" name="paid_on" value="${today}" max="${today}" style="width:140px">
 <select name="mode" style="width:90px">${modes}</select><input name="ref" placeholder="UTR / ref" style="width:140px"><button class="btn sm g">Mark paid</button></form></td></tr>`).join('');
   const recent = p.recently_paid.map((x) => `<li><b>#${x.id}</b> ${esc(x.payee)} · ${inr(x.amount)} · paid ${esc(x.paid_on)} via ${esc(x.paid_mode)}${x.paid_ref ? ` (${esc(x.paid_ref)})` : ''}</li>`).join('');
   return `<div class="card"><div class="row"><h2 style="margin:0">Payout queue</h2><div class="spacer"></div><span class="muted">${p.unpaid.length} to pay · ${inr(p.total_unpaid)}</span></div><div style="height:8px"></div>
 <div class="guard">🔒 Payee name and amount only, so Finance can pay. No expense lines; the rest of Finance's view stays department-level.</div>
-${rows ? `<div style="overflow-x:auto"><table><thead><tr><th>Report</th><th>Payee</th><th class="n">Amount</th><th>Approved</th><th>Record payment</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">Nothing to pay. 🎉</p>'}
+${rows ? `<div style="overflow-x:auto"><table><thead><tr><th>Report</th><th>Payee</th><th class="n">Amount</th><th>Approved</th><th>Record payment</th></tr></thead><tbody>${rows}</tbody></table></div>${pager(pg)}` : '<p class="muted">Nothing to pay. 🎉</p>'}
 ${recent ? `<h2 style="margin-top:16px">Recently paid</h2><ul class="log">${recent}</ul>` : ''}</div>`;
 }
 
-export function employeeDashboard({ user, reports, byCategory, totals, period, show, bq, flash, error }) {
+export function employeeDashboard({ user, reports, byCategory, totals, period, show, bq, params = {}, flash, error }) {
   return layout({
     title: 'Dashboard', user, flash, error,
     body: `<div class="row"><div><h1>My expenses</h1><p class="sub">Ask Claude to file your receipts, or add a report by hand.</p></div><div class="spacer"></div>
 <a class="btn p" href="/reports/new">+ New report</a></div>
 <div class="kpis">${statusToggles({ totals, show, period, bq })}<div class="kpi"><div class="l">Reports shown</div><div class="v">${reports.length}</div></div></div>
 ${filterNote(show, { period, bq })}
-<div class="grid"><div class="card"><h2>My reports</h2>${reportsTable(reports, { empty: show.length === 2 ? 'No reports yet. Try asking Claude to "file my expenses".' : 'No reports with this status.' })}</div>
+<div class="grid"><div class="card"><h2>My reports</h2>${pagedReports(reports, params, 'mine', { empty: show.length === 2 ? 'No reports yet. Try asking Claude to "file my expenses".' : 'No reports with this status.' })}</div>
 <div class="card"><div class="row"><h2>My spend by category</h2><div class="spacer"></div>${periodTabs(period, show, bq)}</div>${summaryTable(byCategory, 'Category')}</div></div>`,
   });
 }
 
-export function managerDashboard({ user, team, pending, all, byDept, byPerson, totals, budgets, compliance, delegated = [], delegation, kpis: kpiData, period, show, bq, flash, error }) {
+export function managerDashboard({ user, team, pending, all, byDept, byPerson, totals, budgets, compliance, delegated = [], delegation, kpis: kpiData, period, show, bq, params = {}, flash, error }) {
   const depts = [...new Set(team.map((t) => t.department))];
   return layout({
     title: 'Team dashboard', user, flash, error,
@@ -285,8 +316,8 @@ export function managerDashboard({ user, team, pending, all, byDept, byPerson, t
 <div class="guard">🔒 You see only your direct reportees: <b>${esc(team.map((t) => `${t.name} (${t.department})`).join(', ') || 'none')}</b>, and only reports they have submitted (drafts stay private). Other departments are hidden.</div>
 <div class="kpis"><div class="kpi"><div class="l">Waiting for you</div><div class="v">${pending.filter((r) => r.status === 'submitted').length}</div></div>${statusToggles({ totals, show, period, bq })}<div class="kpi"><div class="l">Departments</div><div class="v">${esc(depts.join(', '))}</div></div></div>
 ${filterNote(show, { period, bq })}
-${show.includes('pending') ? `<div class="card"><h2>Waiting for your approval</h2><p class="muted">Reports marked <b>Being revised</b> were reopened by the employee: you can read them, but approval waits until they resubmit.<br>⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>` : ''}
-${delegated.length ? `<div class="card"><h2>Delegated to you</h2><p class="muted">Reports from teams whose manager is out of office and delegated approvals to you.</p>${reportsTable(delegated.filter((r) => ['submitted', 'revising'].includes(r.status)), { showOwner: true, empty: 'Nothing waiting.' })}</div>` : ''}
+${show.includes('pending') ? `<div class="card"><h2>Waiting for your approval</h2><p class="muted">Reports marked <b>Being revised</b> were reopened by the employee: you can read them, but approval waits until they resubmit.<br>⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${pagedReports(pending, params, 'wait', { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>` : ''}
+${delegated.length ? `<div class="card"><h2>Delegated to you</h2><p class="muted">Reports from teams whose manager is out of office and delegated approvals to you.</p>${pagedReports(delegated.filter((r) => ['submitted', 'revising'].includes(r.status)), params, 'del', { showOwner: true, empty: 'Nothing waiting.' })}</div>` : ''}
 ${outOfOfficeCard(delegation)}
 <div class="card">${budgetHeader('Budget', budgets, { period, show })}${budgetTable(budgets)}</div>
 <div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period, show, bq)}</div>
@@ -294,19 +325,19 @@ ${outOfOfficeCard(delegation)}
 <div class="card"><h2>By reportee</h2>${summaryTable(byPerson, 'Person')}</div></div>
 <div class="card"><h2>Policy compliance</h2>${complianceTable(compliance)}</div>
 ${kpiData ? `<div class="card"><h2>Approval KPIs</h2>${kpiCard(kpiData)}</div>` : ''}
-<div class="card"><h2>${show.length === 2 ? 'All team reports' : show[0] === 'approved' ? 'Approved team reports' : 'Pending team reports'}</h2>${reportsTable(all, { showOwner: true, empty: 'No reports with this status.' })}</div>`,
+<div class="card"><h2>${show.length === 2 ? 'All team reports' : show[0] === 'approved' ? 'Approved team reports' : 'Pending team reports'}</h2>${pagedReports(all, params, 'team', { showOwner: true, empty: 'No reports with this status.' })}</div>`,
   });
 }
 
-export function financeDashboard({ user, byDept, byManager, byCategory, byMonth, totals, budgets, compliance, financeReview = [], payouts, kpis: kpiData, period, show, bq, flash, error }) {
+export function financeDashboard({ user, byDept, byManager, byCategory, byMonth, totals, budgets, compliance, financeReview = [], payouts, kpis: kpiData, period, show, bq, params = {}, flash, error }) {
   return layout({
     title: 'Finance', user, flash, error,
     body: `<h1>Company spend</h1><p class="sub">Department-level view for Finance.</p>
 <div class="guard">🔒 Finance sees department totals only. Two narrow exceptions so Finance can do its job: reports over ${inr(LIMITS.financeApproval)} escalated for your second approval, and the payout queue (payee and amount only).</div>
 <div class="kpis">${statusToggles({ totals, show, period, bq })}<div class="kpi"><div class="l">GST input credit</div><div class="v">${inr(totals.totals.gst_approved)}</div><div class="muted" style="font-size:12px">on approved spend</div></div><div class="kpi"><div class="l">Departments</div><div class="v">${byDept.rows.length}</div></div></div>
 ${filterNote(show, { period, bq })}
-${(() => { const w = financeReview.filter((r) => r.status === 'finance_review'); return `<div class="card"><h2>Waiting for your second approval</h2><p class="muted">Reports over ${inr(LIMITS.financeApproval)}, already approved by the manager.</p>${reportsTable(w, { showOwner: true, empty: 'Nothing waiting for Finance.' })}</div>`; })()}
-${payouts ? payoutCard(payouts) : ''}
+${(() => { const w = financeReview.filter((r) => r.status === 'finance_review'); return `<div class="card"><h2>Waiting for your second approval</h2><p class="muted">Reports over ${inr(LIMITS.financeApproval)}, already approved by the manager.</p>${pagedReports(w, params, 'fin', { showOwner: true, empty: 'Nothing waiting for Finance.' })}</div>`; })()}
+${payouts ? payoutCard(payouts, params) : ''}
 <div class="card">${budgetHeader('Department budgets', budgets, { period, show })}${budgetTable(budgets, { editable: true })}</div>
 <div class="row" style="margin-bottom:10px"><div class="spacer"></div>${periodTabs(period, show, bq)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>

@@ -51,7 +51,7 @@ DATABASE_URL="postgresql://..." SESSION_SECRET="dev" npm start   # http://localh
 ```
 
 ### Guardrail tests
-Against a freshly seeded database **started with `DEMO_HISTORY=off`** (the checks assert exact demo totals), run 200 web + MCP access checks (each role, allowed and denied):
+Against a freshly seeded database **started with `DEMO_HISTORY=off`** (the checks assert exact demo totals), run 208 web + MCP access checks (each role, allowed and denied):
 ```bash
 npm run test:guardrails -- https://<your-app>.onrender.com   # or http://localhost:3000
 ```
