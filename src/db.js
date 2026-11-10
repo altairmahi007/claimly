@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { hashPassword, newToken } from './auth.js';
 import { policyFlag } from './policy.js';
+import { ensureDemoHistory } from './history.js';
 
 // Keep DATE as 'YYYY-MM-DD' strings and NUMERIC as JS numbers.
 pg.types.setTypeParser(1082, (v) => v);
@@ -155,6 +156,11 @@ export async function initDb() {
   if (rows[0].n === 0) await seedCompany();
   await ensureSecondMiddlewareEngineer();
   await ensureLargeDemoReport();
+  // ~15 months of past reports so trends show up (set DEMO_HISTORY=off to skip, e.g. for the guardrail tests).
+  if (process.env.DEMO_HISTORY !== 'off') {
+    const ids = Object.fromEntries((await q(`SELECT split_part(email, '@', 1) AS k, id FROM users`)).rows.map((u) => [u.k, u.id]));
+    await ensureDemoHistory(q, pool, ids);
+  }
   // Budgets are per quarter. Older databases stored monthly budgets: convert them once (x3).
   await q(`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS quarterly_amount NUMERIC(14,2) CHECK (quarterly_amount >= 0);
            ALTER TABLE budgets ALTER COLUMN monthly_amount DROP NOT NULL;

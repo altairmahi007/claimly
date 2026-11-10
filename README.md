@@ -51,10 +51,13 @@ DATABASE_URL="postgresql://..." SESSION_SECRET="dev" npm start   # http://localh
 ```
 
 ### Guardrail tests
-Against a freshly seeded database, run 200 web + MCP access checks (each role, allowed and denied):
+Against a freshly seeded database **started with `DEMO_HISTORY=off`** (the checks assert exact demo totals), run 200 web + MCP access checks (each role, allowed and denied):
 ```bash
 npm run test:guardrails -- https://<your-app>.onrender.com   # or http://localhost:3000
 ```
+
+### Demo history
+On first start the app also adds ~15 months of past reports (`src/history.js`, deterministic) so trends show up: UI travel peaks in Oct–Dec, Backend training in Apr–Jun, Middleware spend grows steadily, policy breaches fall, and approval / payout turnaround improves from about a week to 2–3 days. It is added once (skipped if already present); set `DEMO_HISTORY=off` to leave it out.
 
 ## Connect Claude
 1. Log in as any user → **Connect Claude** → copy your personal MCP link (`https://<app>/mcp/<secret>`).
