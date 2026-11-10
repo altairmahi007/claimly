@@ -54,6 +54,15 @@ app.use(h(async (req, res, next) => {
 const setCookie = (req, res, value, maxAge) =>
   res.setHeader('Set-Cookie', `sid=${value}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${req.secure ? '; Secure' : ''}`);
 const requireLogin = (req, res, next) => (req.user ? next() : res.redirect('/login'));
+// Dashboard forms (budget save, Mark paid, out of office) return to the same filtered dashboard view.
+const dashboardBack = (req) => {
+  try {
+    const u = new URL(req.get('referer') || '', `${req.protocol}://${req.get('host')}`);
+    if (u.host !== req.get('host') || u.pathname !== '/') return '/';
+    u.searchParams.delete('msg');
+    return u.pathname + (u.searchParams.toString() ? `?${u.searchParams}` : '');
+  } catch { return '/'; }
+};
 const back = (res, path, msg) => res.redirect(`${path}${msg ? `${path.includes('?') ? '&' : '?'}msg=${encodeURIComponent(msg)}` : ''}`);
 
 const CAN = {
@@ -152,11 +161,11 @@ app.get('/', requireLogin, h(async (req, res) => {
 // ---------- Payouts, out of office, policy ----------
 app.post('/reports/:id/paid', requireLogin, h(async (req, res) => {
   const p = await markPaid(req.user, req.params.id, { paid_on: req.body.paid_on, mode: req.body.mode, ref: req.body.ref }, 'web');
-  back(res, '/', `Report #${p.report_id} marked paid to ${p.payee} via ${p.mode} on ${p.paid_on}.`);
+  back(res, dashboardBack(req), `Report #${p.report_id} marked paid to ${p.payee} via ${p.mode} on ${p.paid_on}.`);
 }));
 app.post('/delegate', requireLogin, h(async (req, res) => {
   const d = await setDelegate(req.user, req.body.clear ? {} : { delegate: req.body.delegate, until: req.body.until });
-  back(res, '/', d.delegate ? `Out of office: approvals go to ${d.delegate} until ${d.until}.` : 'Back in office: approvals come to you again.');
+  back(res, dashboardBack(req), d.delegate ? `Out of office: approvals go to ${d.delegate} until ${d.until}.` : 'Back in office: approvals come to you again.');
 }));
 app.get('/policy', requireLogin, (req, res) => res.send(V.policyPage({ user: req.user, policy: policySummary() })));
 app.get('/attention', requireLogin, h(async (req, res) => res.send(V.attentionPage({ user: req.user, a: await attention(req.user, { budgetStatus }) }))));
@@ -164,7 +173,7 @@ app.get('/attention', requireLogin, h(async (req, res) => res.send(V.attentionPa
 // ---------- Finance: budgets and GST ----------
 app.post('/budgets', requireLogin, h(async (req, res) => {
   const b = await setBudget(req.user, req.body.department, req.body.amount);
-  back(res, '/', `${b.department} budget set to ₹${b.quarterly_amount.toLocaleString('en-IN')} per quarter.`);
+  back(res, dashboardBack(req), `${b.department} budget set to ₹${b.quarterly_amount.toLocaleString('en-IN')} per quarter.`);
 }));
 app.get('/finance/gst.csv', requireLogin, h(async (req, res) => {
   const range = periodRange(req.query.period);

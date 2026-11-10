@@ -40,6 +40,7 @@ td.n,th.n{text-align:right;white-space:nowrap}
 input,select,textarea{font:inherit;font-size:14px;border:1px solid #d6d9e6;border-radius:8px;padding:6px 8px;background:#fff;width:100%}
 td input,td select{padding:4px 6px}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.spacer{flex:1}
+.toast{position:fixed;right:16px;bottom:16px;z-index:30;max-width:min(440px,calc(100vw - 32px));margin:0;box-shadow:0 6px 24px rgba(20,30,60,.18);transition:opacity .4s}
 .alert{padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px}.alert.err{background:#fde2e2;color:#8a1515}.alert.ok{background:#dcf5e6;color:#11683a}
 .guard{background:#f0f2ff;border:1px solid #d8ddff;color:#2c3a9e;border-radius:10px;padding:10px 14px;font-size:14px;margin-bottom:18px}
 .muted{color:#778;font-size:13px}code,.code{font-family:ui-monospace,Menlo,monospace;font-size:13px;background:#f3f4f9;border:1px solid #e6e8f0;border-radius:6px;padding:2px 6px;word-break:break-all}
@@ -57,6 +58,28 @@ ol li{margin-bottom:6px}.log li{margin-bottom:6px;font-size:13px}
 textarea{min-height:70px;resize:vertical}
 `;
 
+// Keep the scroll position when a filter, dropdown or form reloads the same page
+// (quarter dropdown, Approved/Pending boxes, period tabs, budget save, Mark paid, comments...).
+// Saved just before leaving, restored on the next load of the same path within 15 seconds.
+const KEEP_SCROLL = `(function () {
+  var K = 'claimly-scroll';
+  try {
+    var s = JSON.parse(sessionStorage.getItem(K) || 'null');
+    sessionStorage.removeItem(K);
+    if (s && s.p === location.pathname && Date.now() - s.t < 15000 && !location.hash) window.scrollTo(0, s.y);
+  } catch (e) {}
+  function save() { try { sessionStorage.setItem(K, JSON.stringify({ p: location.pathname, y: window.scrollY, t: Date.now() })); } catch (e) {} }
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a[href]');
+    if (a && a.origin === location.origin && a.pathname === location.pathname) save();
+  }, true);
+  document.addEventListener('change', function (e) { if (e.target.matches && e.target.matches('select[onchange]')) save(); }, true);
+  document.addEventListener('submit', save, true);
+  var t = document.querySelector('.toast');
+  if (t) setTimeout(function () { t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 400); }, 5000);
+  try { var u = new URL(location.href); if (u.searchParams.has('msg')) { u.searchParams.delete('msg'); history.replaceState(null, '', u.pathname + u.search + u.hash); } } catch (e) {}
+})();`;
+
 export function layout({ title, user, body, flash, error }) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} · Claimly</title><style>${CSS}</style></head><body>
@@ -65,8 +88,8 @@ ${user ? `<nav><a href="/">Dashboard</a>${user.role === 'employee' ? '<a href="/
 <div class="me"><b>${esc(user.name)}</b><br>${ROLE[user.role]} · ${esc(user.department)}</div>
 <form method="post" action="/logout"><button class="btn sm">Log out</button></form>` : '<nav></nav>'}
 </div></header><main>
-${error ? `<div class="alert err">${esc(error)}</div>` : ''}${flash ? `<div class="alert ok">${esc(flash)}</div>` : ''}
-${body}</main></body></html>`;
+${error ? `<div class="alert err">${esc(error)}</div>` : ''}${flash ? `<div class="alert ok toast" role="status">✓ ${esc(flash)}</div>` : ''}
+${body}</main><script>${KEEP_SCROLL}</script></body></html>`;
 }
 
 export function loginPage({ error, accounts }) {
@@ -125,26 +148,26 @@ const qs = ({ period, show, bq }) => {
   if (bq) parts.push(`bq=${bq}`);
   return parts.length ? `/?${parts.join('&')}` : '/';
 };
-export const periodTabs = (current, show) =>
-  `<div class="tabs row">${PERIODS.map(([k, l]) => `<a class="${k === current ? 'on' : ''}" href="${qs({ period: k, show })}">${l}</a>`).join('')}</div>`;
+export const periodTabs = (current, show, bq) =>
+  `<div class="tabs row">${PERIODS.map(([k, l]) => `<a class="${k === current ? 'on' : ''}" href="${qs({ period: k, show, bq })}">${l}</a>`).join('')}</div>`;
 
 const kpis = (items) => `<div class="kpis">${items.map(([l, v]) => `<div class="kpi"><div class="l">${esc(l)}</div><div class="v">${v}</div></div>`).join('')}</div>`;
 
 // Approved / Pending boxes double as filters for every table and list on the dashboard.
 // Clicking toggles that status; at least one always stays on.
-function statusToggles({ totals, show, period }) {
+function statusToggles({ totals, show, period, bq }) {
   const box = (key, label, value) => {
     const on = show.includes(key);
     const next = on ? show.filter((k) => k !== key) : [...show, key];
     const body = `<div class="l">${on ? '☑' : '☐'} ${label}</div><div class="v">${inr(value)}</div><div class="muted" style="font-size:12px">${on ? (next.length ? 'Shown · click to hide' : 'Shown') : 'Hidden · click to show'}</div>`;
     return next.length
-      ? `<a class="kpi toggle ${on ? 'on' : 'off'}" href="${qs({ period, show: next })}" title="${on ? 'Hide' : 'Show'} ${label.toLowerCase()} spend">${body}</a>`
+      ? `<a class="kpi toggle ${on ? 'on' : 'off'}" href="${qs({ period, show: next, bq })}" title="${on ? 'Hide' : 'Show'} ${label.toLowerCase()} spend">${body}</a>`
       : `<div class="kpi toggle on" title="At least one status stays selected">${body}</div>`;
   };
   return box('approved', 'Approved', totals.totals.approved) + box('pending', 'Pending approval', totals.totals.pending);
 }
-const filterNote = (show) => (show.length === 1
-  ? `<div class="alert ok" style="background:#eef0f6;color:#334">Showing <b>${show[0] === 'approved' ? 'approved' : 'pending'}</b> only. <a href="/">Show both</a></div>` : '');
+const filterNote = (show, { period, bq } = {}) => (show.length === 1
+  ? `<div class="alert ok" style="background:#eef0f6;color:#334">Showing <b>${show[0] === 'approved' ? 'approved' : 'pending'}</b> only. <a href="${qs({ period, bq })}">Show both</a></div>` : '');
 
 // Budget grading on approved + pending: the % and status follow the grade; the whole row turns amber at 80% and red over 100%.
 const BAR_APPROVED = '#3b4cca';
@@ -242,31 +265,31 @@ ${rows ? `<div style="overflow-x:auto"><table><thead><tr><th>Report</th><th>Paye
 ${recent ? `<h2 style="margin-top:16px">Recently paid</h2><ul class="log">${recent}</ul>` : ''}</div>`;
 }
 
-export function employeeDashboard({ user, reports, byCategory, totals, period, show, flash, error }) {
+export function employeeDashboard({ user, reports, byCategory, totals, period, show, bq, flash, error }) {
   return layout({
     title: 'Dashboard', user, flash, error,
     body: `<div class="row"><div><h1>My expenses</h1><p class="sub">Ask Claude to file your receipts, or add a report by hand.</p></div><div class="spacer"></div>
 <a class="btn p" href="/reports/new">+ New report</a></div>
-<div class="kpis">${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">Reports shown</div><div class="v">${reports.length}</div></div></div>
-${filterNote(show)}
+<div class="kpis">${statusToggles({ totals, show, period, bq })}<div class="kpi"><div class="l">Reports shown</div><div class="v">${reports.length}</div></div></div>
+${filterNote(show, { period, bq })}
 <div class="grid"><div class="card"><h2>My reports</h2>${reportsTable(reports, { empty: show.length === 2 ? 'No reports yet. Try asking Claude to "file my expenses".' : 'No reports with this status.' })}</div>
-<div class="card"><div class="row"><h2>My spend by category</h2><div class="spacer"></div>${periodTabs(period, show)}</div>${summaryTable(byCategory, 'Category')}</div></div>`,
+<div class="card"><div class="row"><h2>My spend by category</h2><div class="spacer"></div>${periodTabs(period, show, bq)}</div>${summaryTable(byCategory, 'Category')}</div></div>`,
   });
 }
 
-export function managerDashboard({ user, team, pending, all, byDept, byPerson, totals, budgets, compliance, delegated = [], delegation, kpis: kpiData, period, show, flash, error }) {
+export function managerDashboard({ user, team, pending, all, byDept, byPerson, totals, budgets, compliance, delegated = [], delegation, kpis: kpiData, period, show, bq, flash, error }) {
   const depts = [...new Set(team.map((t) => t.department))];
   return layout({
     title: 'Team dashboard', user, flash, error,
     body: `<h1>Team spend</h1><p class="sub">${esc(user.title || '')}</p>
 <div class="guard">🔒 You see only your direct reportees: <b>${esc(team.map((t) => `${t.name} (${t.department})`).join(', ') || 'none')}</b>, and only reports they have submitted (drafts stay private). Other departments are hidden.</div>
-<div class="kpis"><div class="kpi"><div class="l">Waiting for you</div><div class="v">${pending.filter((r) => r.status === 'submitted').length}</div></div>${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">Departments</div><div class="v">${esc(depts.join(', '))}</div></div></div>
-${filterNote(show)}
+<div class="kpis"><div class="kpi"><div class="l">Waiting for you</div><div class="v">${pending.filter((r) => r.status === 'submitted').length}</div></div>${statusToggles({ totals, show, period, bq })}<div class="kpi"><div class="l">Departments</div><div class="v">${esc(depts.join(', '))}</div></div></div>
+${filterNote(show, { period, bq })}
 ${show.includes('pending') ? `<div class="card"><h2>Waiting for your approval</h2><p class="muted">Reports marked <b>Being revised</b> were reopened by the employee: you can read them, but approval waits until they resubmit.<br>⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>` : ''}
 ${delegated.length ? `<div class="card"><h2>Delegated to you</h2><p class="muted">Reports from teams whose manager is out of office and delegated approvals to you.</p>${reportsTable(delegated.filter((r) => ['submitted', 'revising'].includes(r.status)), { showOwner: true, empty: 'Nothing waiting.' })}</div>` : ''}
 ${outOfOfficeCard(delegation)}
 <div class="card">${budgetHeader('Budget', budgets, { period, show })}${budgetTable(budgets)}</div>
-<div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period, show)}</div>
+<div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period, show, bq)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By reportee</h2>${summaryTable(byPerson, 'Person')}</div></div>
 <div class="card"><h2>Policy compliance</h2>${complianceTable(compliance)}</div>
@@ -275,17 +298,17 @@ ${kpiData ? `<div class="card"><h2>Approval KPIs</h2>${kpiCard(kpiData)}</div>` 
   });
 }
 
-export function financeDashboard({ user, byDept, byManager, byCategory, byMonth, totals, budgets, compliance, financeReview = [], payouts, kpis: kpiData, period, show, flash, error }) {
+export function financeDashboard({ user, byDept, byManager, byCategory, byMonth, totals, budgets, compliance, financeReview = [], payouts, kpis: kpiData, period, show, bq, flash, error }) {
   return layout({
     title: 'Finance', user, flash, error,
     body: `<h1>Company spend</h1><p class="sub">Department-level view for Finance.</p>
 <div class="guard">🔒 Finance sees department totals only. Two narrow exceptions so Finance can do its job: reports over ${inr(LIMITS.financeApproval)} escalated for your second approval, and the payout queue (payee and amount only).</div>
-<div class="kpis">${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">GST input credit</div><div class="v">${inr(totals.totals.gst_approved)}</div><div class="muted" style="font-size:12px">on approved spend</div></div><div class="kpi"><div class="l">Departments</div><div class="v">${byDept.rows.length}</div></div></div>
-${filterNote(show)}
+<div class="kpis">${statusToggles({ totals, show, period, bq })}<div class="kpi"><div class="l">GST input credit</div><div class="v">${inr(totals.totals.gst_approved)}</div><div class="muted" style="font-size:12px">on approved spend</div></div><div class="kpi"><div class="l">Departments</div><div class="v">${byDept.rows.length}</div></div></div>
+${filterNote(show, { period, bq })}
 ${(() => { const w = financeReview.filter((r) => r.status === 'finance_review'); return `<div class="card"><h2>Waiting for your second approval</h2><p class="muted">Reports over ${inr(LIMITS.financeApproval)}, already approved by the manager.</p>${reportsTable(w, { showOwner: true, empty: 'Nothing waiting for Finance.' })}</div>`; })()}
 ${payouts ? payoutCard(payouts) : ''}
 <div class="card">${budgetHeader('Department budgets', budgets, { period, show })}${budgetTable(budgets, { editable: true })}</div>
-<div class="row" style="margin-bottom:10px"><div class="spacer"></div>${periodTabs(period, show)}</div>
+<div class="row" style="margin-bottom:10px"><div class="spacer"></div>${periodTabs(period, show, bq)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By approving manager</h2>${summaryTable(byManager, 'Manager')}<p class="muted">Spend from each manager's team. Team totals only, no individual employees.</p></div></div>
 <div class="card"><h2>Policy compliance by department</h2>${complianceTable(compliance)}</div>
