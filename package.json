@@ -5,12 +5,12 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
-    "test:guardrails": "node scripts/guardrails-test.mjs"
+    "start": "node --env-file-if-exists=.env --env-file-if-exists=.env.local src/server.js",
+    "dev": "node --env-file-if-exists=.env --env-file-if-exists=.env.local --watch src/server.js",
+    "test:guardrails": "node --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/guardrails-test.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.9"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.20.0",
