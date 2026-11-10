@@ -3,7 +3,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { AppError, describeAccess, getTeam, spendSummary } from './access.js';
+import { AppError, budgetStatus, complianceSummary, describeAccess, getTeam, gstLedger, setBudget, spendSummary } from './access.js';
 import {
   addComment, addExpenses, addFlag, createReport, decideReport, deleteExpense, getReport, listReports, resolveFlag, submitReport, updateExpense,
 } from './repo.js';
@@ -290,11 +290,13 @@ export function buildMcpServer(user, baseUrl) {
     {
       title: 'Spend summary',
       description:
-        'Exact spend totals computed by the app, limited to what the user may see. group_by: category | department | person | month. ' +
+        'Exact spend totals computed by the app, limited to what the user may see. group_by: category | department | person | manager (the approving manager, i.e. team totals) | month. ' +
+        'statuses: ["approved"], ["pending"] or both (default). Each row also has gst_approved (GST input credit on approved spend). ' +
         'Optional filters: department, person, from/to dates (YYYY-MM-DD). Employees: own spend only. Managers: own team only (by department or reportee). ' +
         'Finance: department-level totals only (no per-person). Use this for any "how much did we spend" question.',
       inputSchema: {
-        group_by: z.enum(['category', 'department', 'person', 'month']).optional(),
+        group_by: z.enum(['category', 'department', 'person', 'manager', 'month']).optional(),
+        statuses: z.array(z.enum(['approved', 'pending'])).optional().describe('Which statuses to include; default both. pending = submitted or being revised'),
         department: z.string().optional(),
         person: z.string().optional(),
         from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -302,6 +304,65 @@ export function buildMcpServer(user, baseUrl) {
       },
     },
     run(async (args) => reply('Spend summary (computed by Claimly).', await spendSummary(user, args)))
+  );
+
+  server.registerTool(
+    'get_budget_status',
+    {
+      title: 'Department budgets',
+      description: 'Monthly budget vs spend per department (approved + pending by default), with % used and remaining, and a state: ok, near limit (80%+), over, or no budget. ' +
+        'Finance: all departments. Managers: their own departments. Employees: not available.',
+      inputSchema: {
+        month: z.string().regex(/^\d{4}-\d{2}$/).optional().describe('YYYY-MM, default this month'),
+        statuses: z.array(z.enum(['approved', 'pending'])).optional(),
+      },
+    },
+    run(async (args) => reply('Budget status (computed by Claimly).', await budgetStatus(user, args)))
+  );
+
+  server.registerTool(
+    'set_department_budget',
+    {
+      title: 'Set a department budget',
+      description: 'Finance only: set the monthly budget for a department in INR. Only do this when the user explicitly asks.',
+      inputSchema: { department: z.string().min(1), monthly_amount: z.number().min(0) },
+    },
+    run(async ({ department, monthly_amount }) => {
+      const b = await setBudget(user, department, monthly_amount);
+      return reply(`${b.department} budget set to ₹${b.monthly_amount.toLocaleString('en-IN')} per month. ${baseUrl}/`);
+    })
+  );
+
+  server.registerTool(
+    'get_compliance_summary',
+    {
+      title: 'Policy compliance by department',
+      description: 'Per department: reports, expense lines, lines breaking company policy and their value, and review flags (open / total). No individual names. ' +
+        'Finance: all departments. Managers: their own team. Use it to see where policy is being ignored.',
+      inputSchema: {
+        from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        statuses: z.array(z.enum(['approved', 'pending'])).optional(),
+      },
+    },
+    run(async (args) => reply('Policy compliance by department (computed by Claimly).', await complianceSummary(user, args)))
+  );
+
+  server.registerTool(
+    'get_gst_ledger',
+    {
+      title: 'GST input credit ledger',
+      description: 'Finance only: GST on approved expenses by month, department and category, for GST filing. Optional date range.',
+      inputSchema: {
+        from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      },
+    },
+    run(async (args) => {
+      const rows = await gstLedger(user, args);
+      const total = Math.round(rows.reduce((t, r) => t + r.gst, 0) * 100) / 100;
+      return reply(`GST input credit: ₹${total.toLocaleString('en-IN')} across ${rows.length} rows. CSV: ${baseUrl}/finance/gst.csv`, rows);
+    })
   );
 
   return server;

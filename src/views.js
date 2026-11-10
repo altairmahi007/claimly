@@ -40,6 +40,7 @@ td input,td select{padding:4px 6px}
 .alert{padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px}.alert.err{background:#fde2e2;color:#8a1515}.alert.ok{background:#dcf5e6;color:#11683a}
 .guard{background:#f0f2ff;border:1px solid #d8ddff;color:#2c3a9e;border-radius:10px;padding:10px 14px;font-size:14px;margin-bottom:18px}
 .muted{color:#778;font-size:13px}code,.code{font-family:ui-monospace,Menlo,monospace;font-size:13px;background:#f3f4f9;border:1px solid #e6e8f0;border-radius:6px;padding:2px 6px;word-break:break-all}
+.kpi.toggle{display:block;color:inherit;text-decoration:none;cursor:pointer;border-width:2px}.kpi.toggle.on{border-color:#3b4cca}.kpi.toggle.off{opacity:.55;border-style:dashed}.kpi.toggle:hover{text-decoration:none;background:#f8f9ff}
 .tabs a{padding:5px 12px;border-radius:99px;color:#556;font-size:13px}.tabs a.on{background:#1c2333;color:#fff}
 .login{max-width:900px;margin:40px auto;display:grid;grid-template-columns:1fr 1.2fr;gap:24px}
 @media(max-width:760px){.login{grid-template-columns:1fr}nav{display:none}}
@@ -82,11 +83,14 @@ export function loginPage({ error, accounts }) {
   });
 }
 
-export function summaryTable(sum, label) {
-  if (!sum.rows.length) return `<p class="muted">No submitted or approved spend yet.</p>`;
-  return `<table><thead><tr><th>${esc(label)}</th><th class="n">Approved</th><th class="n">Pending</th><th class="n">Total</th></tr></thead><tbody>
-${sum.rows.map((r) => `<tr><td>${esc(r.group)}</td><td class="n">${inr(r.approved)}</td><td class="n">${inr(r.pending)}</td><td class="n"><b>${inr(r.total)}</b></td></tr>`).join('')}
-</tbody><tfoot><tr><td>Total</td><td class="n">${inr(sum.totals.approved)}</td><td class="n">${inr(sum.totals.pending)}</td><td class="n">${inr(sum.totals.total)}</td></tr></tfoot></table>`;
+// Spend table. Shows only the status columns that are switched on (the Approved / Pending boxes).
+export function summaryTable(sum, label, { gst = false } = {}) {
+  const on = (k) => (sum.statuses || ['approved', 'pending']).includes(k);
+  if (!sum.rows.length) return `<p class="muted">No ${on('approved') && on('pending') ? 'submitted or approved' : on('approved') ? 'approved' : 'pending'} spend for this period.</p>`;
+  const cols = [on('approved') && ['Approved', 'approved'], on('pending') && ['Pending', 'pending'], ['Total', 'total'], gst && ['GST credit', 'gst_approved']].filter(Boolean);
+  return `<table><thead><tr><th>${esc(label)}</th>${cols.map(([l]) => `<th class="n">${l}</th>`).join('')}</tr></thead><tbody>
+${sum.rows.map((r) => `<tr><td>${esc(r.group)}</td>${cols.map(([, k]) => `<td class="n">${k === 'total' ? `<b>${inr(r[k])}</b>` : inr(r[k])}</td>`).join('')}</tr>`).join('')}
+</tbody><tfoot><tr><td>Total</td>${cols.map(([, k]) => `<td class="n">${inr(sum.totals[k])}</td>`).join('')}</tr></tfoot></table>`;
 }
 
 // Chips that tell a reviewer, at a glance, what needs attention on a report.
@@ -107,47 +111,104 @@ ${showOwner ? `<td>${esc(r.owner_name)}<div class="muted">${esc(r.department)}</
 }
 
 const PERIODS = [['all', 'All time'], ['this_month', 'This month'], ['last_month', 'Last month'], ['last_90', 'Last 90 days']];
-export const periodTabs = (current) =>
-  `<div class="tabs row">${PERIODS.map(([k, l]) => `<a class="${k === current ? 'on' : ''}" href="/?period=${k}">${l}</a>`).join('')}</div>`;
+const qs = ({ period, show }) => {
+  const parts = [];
+  if (period && period !== 'all') parts.push(`period=${period}`);
+  if (show && show.length === 1) parts.push(`show=${show[0]}`);
+  return parts.length ? `/?${parts.join('&')}` : '/';
+};
+export const periodTabs = (current, show) =>
+  `<div class="tabs row">${PERIODS.map(([k, l]) => `<a class="${k === current ? 'on' : ''}" href="${qs({ period: k, show })}">${l}</a>`).join('')}</div>`;
 
 const kpis = (items) => `<div class="kpis">${items.map(([l, v]) => `<div class="kpi"><div class="l">${esc(l)}</div><div class="v">${v}</div></div>`).join('')}</div>`;
 
-export function employeeDashboard({ user, reports, byCategory, period, flash, error }) {
+// Approved / Pending boxes double as filters for every table and list on the dashboard.
+// Clicking toggles that status; at least one always stays on.
+function statusToggles({ totals, show, period }) {
+  const box = (key, label, value) => {
+    const on = show.includes(key);
+    const next = on ? show.filter((k) => k !== key) : [...show, key];
+    const body = `<div class="l">${on ? '☑' : '☐'} ${label}</div><div class="v">${inr(value)}</div><div class="muted" style="font-size:12px">${on ? (next.length ? 'Shown · click to hide' : 'Shown') : 'Hidden · click to show'}</div>`;
+    return next.length
+      ? `<a class="kpi toggle ${on ? 'on' : 'off'}" href="${qs({ period, show: next })}" title="${on ? 'Hide' : 'Show'} ${label.toLowerCase()} spend">${body}</a>`
+      : `<div class="kpi toggle on" title="At least one status stays selected">${body}</div>`;
+  };
+  return box('approved', 'Approved', totals.totals.approved) + box('pending', 'Pending approval', totals.totals.pending);
+}
+const filterNote = (show) => (show.length === 1
+  ? `<div class="alert ok" style="background:#eef0f6;color:#334">Showing <b>${show[0] === 'approved' ? 'approved' : 'pending'}</b> only. <a href="/">Show both</a></div>` : '');
+
+function budgetTable(b, { editable = false } = {}) {
+  if (!b.rows.length) return '<p class="muted">No departments yet.</p>';
+  const bar = (pct, state) => {
+    const color = state === 'over' ? '#c62828' : state === 'near limit' ? '#e08a00' : '#11804a';
+    return pct == null ? '' : `<div style="background:#eef0f6;border-radius:99px;height:6px;margin-top:4px"><div style="width:${Math.min(pct, 100)}%;background:${color};height:6px;border-radius:99px"></div></div>`;
+  };
+  const stateChip = (st) => (st === 'over' ? '<span class="chip warn" style="background:#fde2e2;color:#a11d1d">Over budget</span>'
+    : st === 'near limit' ? '<span class="chip warn">Near limit</span>' : st === 'ok' ? '<span class="chip">On track</span>' : '<span class="muted">No budget</span>');
+  return `<table><thead><tr><th>Department</th><th class="n">Budget / month</th><th class="n">Used</th><th class="n">Left</th><th>Status</th></tr></thead><tbody>
+${b.rows.map((r) => `<tr><td><b>${esc(r.department)}</b></td>
+<td class="n">${editable ? `<form method="post" action="/budgets" class="row" style="justify-content:flex-end;gap:6px"><input type="hidden" name="department" value="${esc(r.department)}">
+<input name="amount" type="number" min="0" step="1000" value="${r.budget ?? ''}" placeholder="Set" style="width:110px"><button class="btn sm">Save</button></form>` : r.budget == null ? '—' : inr(r.budget)}</td>
+<td class="n">${inr(r.used)}${r.pct_used != null ? ` <span class="muted">(${r.pct_used}%)</span>` : ''}${bar(r.pct_used, r.state)}</td>
+<td class="n">${r.remaining == null ? '—' : inr(r.remaining)}</td><td>${stateChip(r.state)}</td></tr>`).join('')}
+</tbody></table><p class="muted">Spend dated in ${esc(b.month)}, ${b.statuses.length === 2 ? 'approved + pending' : b.statuses[0] + ' only'}. Amber at 80%, red over 100%.</p>`;
+}
+
+function complianceTable(c) {
+  if (!c.rows.length) return '<p class="muted">Nothing to report for this period.</p>';
+  return `<table><thead><tr><th>Department</th><th class="n">Reports</th><th class="n">Policy breaches</th><th class="n">Breach value</th><th class="n">Review flags</th></tr></thead><tbody>
+${c.rows.map((r) => `<tr><td><b>${esc(r.department)}</b></td><td class="n">${r.reports}</td>
+<td class="n">${r.policy_breaches ? `<span class="chip warn">⚠ ${r.policy_breaches} of ${r.lines} lines (${r.pct_lines_breaching}%)</span>` : `0 of ${r.lines}`}</td>
+<td class="n">${inr(r.policy_breach_value)}</td>
+<td class="n">${r.review_flags ? `<span class="chip ai">🔎 ${r.open_review_flags} open / ${r.review_flags}</span>` : '0'}</td></tr>`).join('')}
+</tbody></table><p class="muted">Policy breaches are checked by the app (meal, hotel and pre-approval limits, future dates). Review flags are raised during review, often by Claude.</p>`;
+}
+
+export function employeeDashboard({ user, reports, byCategory, totals, period, show, flash, error }) {
   return layout({
     title: 'Dashboard', user, flash, error,
     body: `<div class="row"><div><h1>My expenses</h1><p class="sub">Ask Claude to file your receipts, or add a report by hand.</p></div><div class="spacer"></div>
 <a class="btn p" href="/reports/new">+ New report</a></div>
-${kpis([['Approved', inr(byCategory.totals.approved)], ['Pending approval', inr(byCategory.totals.pending)], ['Reports', reports.length]])}
-<div class="grid"><div class="card"><h2>My reports</h2>${reportsTable(reports, { empty: 'No reports yet. Try asking Claude to "file my expenses".' })}</div>
-<div class="card"><div class="row"><h2>My spend by category</h2><div class="spacer"></div>${periodTabs(period)}</div>${summaryTable(byCategory, 'Category')}</div></div>`,
+<div class="kpis">${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">Reports shown</div><div class="v">${reports.length}</div></div></div>
+${filterNote(show)}
+<div class="grid"><div class="card"><h2>My reports</h2>${reportsTable(reports, { empty: show.length === 2 ? 'No reports yet. Try asking Claude to "file my expenses".' : 'No reports with this status.' })}</div>
+<div class="card"><div class="row"><h2>My spend by category</h2><div class="spacer"></div>${periodTabs(period, show)}</div>${summaryTable(byCategory, 'Category')}</div></div>`,
   });
 }
 
-export function managerDashboard({ user, team, pending, all, byDept, byPerson, period, flash, error }) {
+export function managerDashboard({ user, team, pending, all, byDept, byPerson, totals, budgets, compliance, period, show, flash, error }) {
   const depts = [...new Set(team.map((t) => t.department))];
   return layout({
     title: 'Team dashboard', user, flash, error,
     body: `<h1>Team spend</h1><p class="sub">${esc(user.title || '')}</p>
 <div class="guard">🔒 You see only your direct reportees: <b>${esc(team.map((t) => `${t.name} (${t.department})`).join(', ') || 'none')}</b>, and only reports they have submitted (drafts stay private). Other departments are hidden.</div>
-${kpis([['Waiting for you', pending.filter((r) => r.status === 'submitted').length], ['Approved', inr(byDept.totals.approved)], ['Pending', inr(byDept.totals.pending)], ['Departments', esc(depts.join(', '))]])}
-<div class="card"><h2>Waiting for your approval</h2><p class="muted">Reports marked <b>Being revised</b> were reopened by the employee: you can read them, but approval waits until they resubmit.<br>⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>
-<div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period)}</div>
+<div class="kpis"><div class="kpi"><div class="l">Waiting for you</div><div class="v">${pending.filter((r) => r.status === 'submitted').length}</div></div>${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">Departments</div><div class="v">${esc(depts.join(', '))}</div></div></div>
+${filterNote(show)}
+${show.includes('pending') ? `<div class="card"><h2>Waiting for your approval</h2><p class="muted">Reports marked <b>Being revised</b> were reopened by the employee: you can read them, but approval waits until they resubmit.<br>⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>` : ''}
+<div class="card"><h2>Budget this month</h2>${budgetTable(budgets)}</div>
+<div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period, show)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By reportee</h2>${summaryTable(byPerson, 'Person')}</div></div>
-<div class="card"><h2>All team reports</h2>${reportsTable(all, { showOwner: true })}</div>`,
+<div class="card"><h2>Policy compliance</h2>${complianceTable(compliance)}</div>
+<div class="card"><h2>${show.length === 2 ? 'All team reports' : show[0] === 'approved' ? 'Approved team reports' : 'Pending team reports'}</h2>${reportsTable(all, { showOwner: true, empty: 'No reports with this status.' })}</div>`,
   });
 }
 
-export function financeDashboard({ user, byDept, byCategory, byMonth, period, flash, error }) {
+export function financeDashboard({ user, byDept, byManager, byCategory, byMonth, totals, budgets, compliance, period, show, flash, error }) {
   return layout({
     title: 'Finance', user, flash, error,
     body: `<h1>Company spend</h1><p class="sub">Department-level view for Finance.</p>
 <div class="guard">🔒 Finance sees department totals only. Individual employees and their reports are hidden by design.</div>
-${kpis([['Approved', inr(byDept.totals.approved)], ['Pending approval', inr(byDept.totals.pending)], ['Total committed', inr(byDept.totals.total)], ['Departments', byDept.rows.length]])}
-<div class="row" style="margin-bottom:10px"><div class="spacer"></div>${periodTabs(period)}</div>
+<div class="kpis">${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">GST input credit</div><div class="v">${inr(totals.totals.gst_approved)}</div><div class="muted" style="font-size:12px">on approved spend</div></div><div class="kpi"><div class="l">Departments</div><div class="v">${byDept.rows.length}</div></div></div>
+${filterNote(show)}
+<div class="card"><div class="row"><h2>Department budgets (${esc(budgets.month)})</h2></div>${budgetTable(budgets, { editable: true })}</div>
+<div class="row" style="margin-bottom:10px"><div class="spacer"></div>${periodTabs(period, show)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
-<div class="card"><h2>By category</h2>${summaryTable(byCategory, 'Category')}</div></div>
-<div class="card"><h2>By month</h2>${summaryTable(byMonth, 'Month')}</div>`,
+<div class="card"><h2>By approving manager</h2>${summaryTable(byManager, 'Manager')}<p class="muted">Spend from each manager's team. Team totals only, no individual employees.</p></div></div>
+<div class="card"><h2>Policy compliance by department</h2>${complianceTable(compliance)}</div>
+<div class="grid"><div class="card"><h2>By category</h2>${summaryTable(byCategory, 'Category')}</div>
+<div class="card"><div class="row"><h2>GST input credit by month</h2><div class="spacer"></div><a class="btn sm" href="/finance/gst.csv${period !== 'all' ? `?period=${period}` : ''}">Export CSV</a></div>${summaryTable(byMonth, 'Month', { gst: true })}<p class="muted">GST credit counts approved expenses only. The CSV breaks it down by month, department and category for filing.</p></div></div>`,
   });
 }
 
@@ -270,7 +331,7 @@ export function connectPage({ user, mcpUrl, flash }) {
   const prompts = {
     employee: ['Here are my receipts from the Pune trip. File them as an expense report and submit it.', 'Has my manager asked anything on my reports? Reply that the hotel invoice date is the checkout date.', 'How much have I spent on meals this month?'],
     manager: ['What reports are waiting for my approval? Check each one and flag anything that looks off.', 'Ask Arjun why the dinner is over the meal limit.', 'Show my team\'s spend by department and by person.', "What did the Middleware team spend? (you'll see the guardrail block this)"],
-    finance: ['Show company spend by department for this month.', "How much did Arjun spend? (you'll see the guardrail block this)"],
+    finance: ['Which departments are near or over budget this month?', 'Where is policy being ignored most? Compare departments.', 'How much GST input credit can we claim for last month?', 'Show spend by approving manager.', "How much did Arjun spend? (you'll see the guardrail block this)"],
   }[user.role];
   return layout({
     title: 'Connect Claude', user, flash,

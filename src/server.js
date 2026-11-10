@@ -2,7 +2,9 @@ import express from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { initDb, q } from './db.js';
 import { makeSession, newToken, parseCookies, readSession, verifyPassword } from './auth.js';
-import { AppError, getTeam, getUserByEmail, getUserById, getUserByToken, spendSummary } from './access.js';
+import {
+  AppError, budgetStatus, complianceSummary, getTeam, getUserByEmail, getUserById, getUserByToken, gstLedger, setBudget, spendSummary,
+} from './access.js';
 import {
   addComment, addExpenses, addFlag, createReport, decideReport, deleteExpense, deleteReport, getReport, listReports, renameReport, resolveFlag,
   startRevision, submitReport, updateExpense,
@@ -92,31 +94,68 @@ function periodRange(p) {
   return {};
 }
 
+// The Approved / Pending boxes are toggles: ?show=approved, ?show=pending, or both (default).
+function parseShow(q) {
+  const keys = String(q || '').split(',').filter((k) => k === 'approved' || k === 'pending');
+  return keys.length ? [...new Set(keys)] : ['approved', 'pending'];
+}
+
 app.get('/', requireLogin, h(async (req, res) => {
   const user = req.user;
   const period = ['this_month', 'last_month', 'last_90'].includes(req.query.period) ? req.query.period : 'all';
   const range = periodRange(period);
-  const flash = req.query.msg;
+  const show = parseShow(req.query.show);
+  const statuses = show;
+  const listStatuses = show.length === 2 ? undefined : show; // both on = every report, incl. drafts/rejected
+  const view = { user, period, show, flash: req.query.msg };
   if (user.role === 'employee') {
-    const [reports, byCategory] = await Promise.all([listReports(user), spendSummary(user, { group_by: 'category', ...range })]);
-    return res.send(V.employeeDashboard({ user, reports, byCategory, period, flash }));
+    const [reports, byCategory, totals] = await Promise.all([
+      listReports(user, { statuses: listStatuses }),
+      spendSummary(user, { group_by: 'category', ...range, statuses }),
+      spendSummary(user, { group_by: 'category', ...range }),
+    ]);
+    return res.send(V.employeeDashboard({ ...view, reports, byCategory, totals }));
   }
   if (user.role === 'manager') {
-    const [team, all, byDept, byPerson] = await Promise.all([
+    const [team, all, byDept, byPerson, totals, budgets, compliance] = await Promise.all([
       getTeam(user.id),
-      listReports(user, { scope: 'team' }),
+      listReports(user, { scope: 'team', statuses: listStatuses }),
+      spendSummary(user, { group_by: 'department', ...range, statuses }),
+      spendSummary(user, { group_by: 'person', ...range, statuses }),
       spendSummary(user, { group_by: 'department', ...range }),
-      spendSummary(user, { group_by: 'person', ...range }),
+      budgetStatus(user, { statuses }),
+      complianceSummary(user, { ...range, statuses }),
     ]);
     const pending = all.filter((r) => ['submitted', 'revising'].includes(r.status));
-    return res.send(V.managerDashboard({ user, team, pending, all, byDept, byPerson, period, flash }));
+    return res.send(V.managerDashboard({ ...view, team, pending, all, byDept, byPerson, totals, budgets, compliance }));
   }
-  const [byDept, byCategory, byMonth] = await Promise.all([
+  const [byDept, byManager, byCategory, byMonth, totals, budgets, compliance] = await Promise.all([
+    spendSummary(user, { group_by: 'department', ...range, statuses }),
+    spendSummary(user, { group_by: 'manager', ...range, statuses }),
+    spendSummary(user, { group_by: 'category', ...range, statuses }),
+    spendSummary(user, { group_by: 'month', ...range, statuses }),
     spendSummary(user, { group_by: 'department', ...range }),
-    spendSummary(user, { group_by: 'category', ...range }),
-    spendSummary(user, { group_by: 'month', ...range }),
+    budgetStatus(user, { statuses }),
+    complianceSummary(user, { ...range, statuses }),
   ]);
-  res.send(V.financeDashboard({ user, byDept, byCategory, byMonth, period, flash }));
+  res.send(V.financeDashboard({ ...view, byDept, byManager, byCategory, byMonth, totals, budgets, compliance }));
+}));
+
+// ---------- Finance: budgets and GST ----------
+app.post('/budgets', requireLogin, h(async (req, res) => {
+  const b = await setBudget(req.user, req.body.department, req.body.amount);
+  back(res, '/', `${b.department} budget set to ₹${b.monthly_amount.toLocaleString('en-IN')}/month.`);
+}));
+app.get('/finance/gst.csv', requireLogin, h(async (req, res) => {
+  const range = periodRange(req.query.period);
+  const rows = await gstLedger(req.user, range);
+  const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [['Month', 'Department', 'Category', 'Approved amount (INR)', 'GST input credit (INR)', 'Lines']]
+    .concat(rows.map((r) => [r.month, r.department, r.category, r.amount, r.gst, r.lines]))
+    .map((row) => row.map(cell).join(','));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="claimly-gst-input-credit.csv"');
+  res.send('﻿' + lines.join('\n'));
 }));
 
 // ---------- Reports ----------

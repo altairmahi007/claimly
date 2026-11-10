@@ -1,7 +1,7 @@
 // Report and expense operations. Every function checks access through access.js first.
 
 import { q, pool, insertExpense, logActivity } from './db.js';
-import { AppError, loadReportFor } from './access.js';
+import { AppError, STATUS_FILTERS, loadReportFor } from './access.js';
 import { CATEGORIES, FLAG_KINDS, policyFlag } from './policy.js';
 
 const inr = (n) => '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -39,7 +39,8 @@ async function tx(fn) {
 
 const touch = (client, id) => client.query(`UPDATE reports SET updated_at = now() WHERE id = $1`, [id]);
 
-export async function listReports(user, { scope = 'mine', status } = {}) {
+// statuses: optional ['approved'] / ['pending'] filter from the dashboard boxes (pending = submitted or being revised).
+export async function listReports(user, { scope = 'mine', status, statuses } = {}) {
   if (user.role === 'finance') throw new AppError('Finance can see department-level totals only, not individual reports. Use the spend summary instead.');
   const where = [];
   const params = [];
@@ -52,6 +53,7 @@ export async function listReports(user, { scope = 'mine', status } = {}) {
     where.push(`r.owner_id = ${p(user.id)}`);
   }
   if (status) where.push(`r.status = ${p(status)}`);
+  if (statuses && statuses.length) where.push(`r.status = ANY(${p(statuses.flatMap((k) => STATUS_FILTERS[k] || []))})`);
   const { rows } = await q(
     `SELECT r.id, r.title, r.status, r.created_via, r.created_at, r.submitted_at,
             u.name AS owner_name, u.department,

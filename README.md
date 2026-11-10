@@ -13,7 +13,7 @@ Claimly does everything else: it stores the report, checks policy, routes it to 
 | Divya Nair | divya@claimly.demo | Employee, **Middleware** (manager: Vikram) | Own reports and own spend |
 | Ria Sharma | ria@claimly.demo | Manager of UI + Backend | Arjun's and Neha's **submitted** reports (approve, reject, correct, flag, discuss); spend **by department and by reportee**. **Cannot** see drafts, Middleware, Karan or Divya. |
 | Vikram Rao | vikram@claimly.demo | Manager of Middleware | Karan's and Divya's submitted reports |
-| Ashish Verma | ashish@claimly.demo | Finance | **Department-level totals only** across the company. **Cannot** see individual people or reports. |
+| Ashish Verma | ashish@claimly.demo | Finance | **Department-level** spend across the company (by department, approving manager, category, month), **department budgets** (sets them), **policy compliance by department**, **GST input-credit ledger** (CSV). **Cannot** see individual employees or reports. |
 
 The guardrails live in `src/access.js`. The web app and the MCP tools both call the same functions, so a prompt in Claude can't get around them.
 
@@ -51,7 +51,7 @@ DATABASE_URL="postgresql://..." SESSION_SECRET="dev" npm start   # http://localh
 ```
 
 ### Guardrail tests
-Against a freshly seeded database, run 118 web + MCP access checks (each role, allowed and denied):
+Against a freshly seeded database, run 142 web + MCP access checks (each role, allowed and denied):
 ```bash
 npm run test:guardrails -- https://<your-app>.onrender.com   # or http://localhost:3000
 ```
@@ -76,9 +76,14 @@ To demo several roles, add a connector for each person (e.g. "Claimly – Arjun"
 | `flag_issue` | Record a problem found in review (date or amount mismatch, duplicate, overspending, missing receipt…), optionally on one line |
 | `resolve_flag` | Manager marks a flag resolved, with a note |
 | `add_comment` | Conversation on a report between the employee and their manager |
-| `get_spend_summary` | Exact totals computed by the app, by category, department, person or month, limited to the caller's scope |
+| `get_spend_summary` | Exact totals computed by the app, by category, department, person, approving manager or month, for approved and/or pending, limited to the caller's scope |
+| `get_budget_status`, `set_department_budget` | Monthly budget vs spend per department (Finance: all, sets budgets; managers: their departments) |
+| `get_compliance_summary` | Policy breaches and review flags per department, no names (Finance and managers) |
+| `get_gst_ledger` | GST input credit on approved spend by month, department and category (Finance) |
 
 Drafts are private: managers only see a report once it has been submitted. Reports open read-only with an **Edit** button. If the employee edits a submitted report (on the web or through Claude), it becomes **Being revised**: the manager can still read it and comment, but can't approve or reject it until the employee resubmits. It still counts as pending spend. Every report page has a **Flags** section (the app's policy checks plus issues raised in review, often by Claude) and a **Conversation** thread; the approval queue shows both as chips.
+
+On every dashboard the **Approved** and **Pending** boxes are toggles: switch one off to filter all spend tables and report lists to the other.
 
 Policy checks run in the app on every save: meals over ₹1,500/item, hotels over ₹8,000/night, anything over ₹50,000 (needs finance pre-approval), and future dates.
 

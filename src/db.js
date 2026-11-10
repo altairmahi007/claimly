@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS comments (
   via        TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS budgets (
+  department     TEXT PRIMARY KEY,
+  monthly_amount NUMERIC(12,2) NOT NULL CHECK (monthly_amount >= 0),
+  updated_by     INTEGER REFERENCES users(id),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE INDEX IF NOT EXISTS idx_flags_report ON flags(report_id);
 CREATE INDEX IF NOT EXISTS idx_comments_report ON comments(report_id);
 CREATE INDEX IF NOT EXISTS idx_expenses_report ON expenses(report_id);
@@ -136,6 +142,9 @@ export async function initDb() {
   const { rows } = await q('SELECT COUNT(*)::int AS n FROM users');
   if (rows[0].n === 0) await seedCompany();
   await ensureSecondMiddlewareEngineer();
+  // Starting monthly budgets for the demo departments (Finance can change them; existing values are kept).
+  await q(`INSERT INTO budgets (department, monthly_amount) VALUES ('UI', 60000), ('Backend', 60000), ('Middleware', 50000)
+           ON CONFLICT (department) DO NOTHING`);
 }
 
 // Middleware needs at least two people, otherwise Finance's "Middleware" department total

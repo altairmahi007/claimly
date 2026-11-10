@@ -26,9 +26,9 @@ export function describeAccess(user, team = []) {
   if (user.role === 'employee') return 'You can create, edit and submit your own expense reports, and see your own spend.';
   if (user.role === 'manager') {
     const depts = [...new Set(team.map((t) => t.department))];
-    return `You can see and approve reports from your direct reportees (${team.map((t) => t.name).join(', ') || 'none'}) and see spend for your departments (${depts.join(', ') || 'none'}), by department or by person. You cannot see other teams.`;
+    return `You can see and approve reports from your direct reportees (${team.map((t) => t.name).join(', ') || 'none'}) and see spend for your departments (${depts.join(', ') || 'none'}), by department or by person, plus your departments' budgets and policy compliance. You cannot see other teams.`;
   }
-  return 'You can see department-level spend totals across the company. Individual reports and per-person spend are hidden from Finance by design.';
+  return 'You can see department-level spend across the company (by department, approving manager, category or month), set monthly department budgets, track policy compliance by department and pull the GST input-credit ledger. Individual reports and per-person spend are hidden from Finance by design.';
 }
 
 // Managers see a reportee's report only once it has been submitted: drafts are private to the employee.
@@ -79,6 +79,7 @@ const GROUPS = {
   category: 'e.category',
   department: 'u.department',
   person: 'u.name',
+  manager: "COALESCE(m.name, '(no manager)')", // the reportee's manager, i.e. who approves the spend
   month: "to_char(e.spent_on, 'YYYY-MM')",
 };
 
@@ -87,25 +88,31 @@ const sameName = (full, asked) => {
   return full.toLowerCase() === a || full.split(' ')[0].toLowerCase() === a;
 };
 
-// Spend summary with role-based scope. Counts submitted / being revised (pending) + approved reports.
-export async function spendSummary(user, { group_by = 'category', department, person, from, to } = {}) {
-  const groupExpr = GROUPS[group_by];
-  if (!groupExpr) throw new AppError('group_by must be one of: category, department, person, month.', 400);
+// Approved / Pending filter (the dashboard boxes). Pending = submitted or being revised.
+export const STATUS_FILTERS = { approved: ['approved'], pending: ['submitted', 'revising'] };
+export function dbStatuses(statuses) {
+  const keys = (statuses && statuses.length ? statuses : ['approved', 'pending']).filter((k) => STATUS_FILTERS[k]);
+  if (!keys.length) throw new AppError('statuses must include "approved" and/or "pending".', 400);
+  return { keys, db: keys.flatMap((k) => STATUS_FILTERS[k]) };
+}
 
-  const where = [`r.status IN ('submitted','revising','approved')`];
+// The role-based WHERE clause shared by every aggregate (spend, budgets, compliance).
+// Employees: own expenses. Managers: own direct reportees. Finance: everyone, but never per person.
+async function scopeFor(user, { group_by, department, person } = {}) {
+  const where = [];
   const params = [];
   const p = (v) => { params.push(v); return `$${params.length}`; };
   let scope;
-
+  let depts = null;
   if (user.role === 'employee') {
-    if (group_by === 'department' || group_by === 'person' || department || person) {
+    if (['department', 'person', 'manager'].includes(group_by) || department || person) {
       throw new AppError('Employees can only see their own spend (group by category or month).');
     }
     where.push(`u.id = ${p(user.id)}`);
     scope = `${user.name}'s own expenses`;
   } else if (user.role === 'manager') {
     const team = await getTeam(user.id);
-    const depts = [...new Set(team.map((t) => t.department))];
+    depts = [...new Set(team.map((t) => t.department))];
     where.push(`u.manager_id = ${p(user.id)}`);
     if (department) {
       const d = depts.find((x) => x.toLowerCase() === String(department).trim().toLowerCase());
@@ -122,12 +129,24 @@ export async function spendSummary(user, { group_by = 'category', department, pe
     if (group_by === 'person' || person) {
       throw new AppError('Access denied: Finance can see department-level totals only, not spend by individual employee.');
     }
+    where.push(`u.role = 'employee'`);
     if (department) where.push(`lower(u.department) = lower(${p(String(department).trim())})`);
     scope = 'All departments (department-level totals only)';
   } else {
     throw new AppError('Unknown role.');
   }
+  return { where, params, p, scope, depts };
+}
 
+const round2 = (n) => Math.round(n * 100) / 100;
+
+// Spend summary with role-based scope, for the selected statuses (approved and/or pending).
+export async function spendSummary(user, { group_by = 'category', department, person, from, to, statuses } = {}) {
+  const groupExpr = GROUPS[group_by];
+  if (!groupExpr) throw new AppError(`group_by must be one of: ${Object.keys(GROUPS).join(', ')}.`, 400);
+  const st = dbStatuses(statuses);
+  const { where, params, p, scope } = await scopeFor(user, { group_by, department, person });
+  where.push(`r.status = ANY(${p(st.db)})`);
   if (from) where.push(`e.spent_on >= ${p(from)}`);
   if (to) where.push(`e.spent_on <= ${p(to)}`);
 
@@ -136,24 +155,137 @@ export async function spendSummary(user, { group_by = 'category', department, pe
             COALESCE(SUM(e.amount) FILTER (WHERE r.status = 'approved'), 0)  AS approved,
             COALESCE(SUM(e.amount) FILTER (WHERE r.status IN ('submitted','revising')), 0) AS pending,
             SUM(e.amount) AS total,
+            COALESCE(SUM(e.gst) FILTER (WHERE r.status = 'approved'), 0) AS gst_approved,
             COUNT(*)::int AS items
        FROM expenses e
        JOIN reports r ON r.id = e.report_id
        JOIN users u   ON u.id = r.owner_id
+       LEFT JOIN users m ON m.id = u.manager_id
       WHERE ${where.join(' AND ')}
       GROUP BY grp
       ORDER BY total DESC`,
     params
   );
 
-  const out = rows.map((r) => ({ group: r.grp, approved: r.approved, pending: r.pending, total: r.total, items: r.items }));
-  const sum = (k) => Math.round(out.reduce((s, r) => s + r[k], 0) * 100) / 100;
+  const out = rows.map((r) => ({ group: r.grp, approved: r.approved, pending: r.pending, total: r.total, gst_approved: r.gst_approved, items: r.items }));
+  const sum = (k) => round2(out.reduce((s, r) => s + r[k], 0));
   return {
     scope,
     group_by,
+    statuses: st.keys,
     filters: { department: department || null, person: person || null, from: from || null, to: to || null },
     rows: out,
-    totals: { approved: sum('approved'), pending: sum('pending'), total: sum('total'), items: out.reduce((s, r) => s + r.items, 0) },
-    note: 'Amounts in INR. "pending" = submitted or being revised, awaiting approval; drafts and rejected reports are excluded.',
+    totals: { approved: sum('approved'), pending: sum('pending'), total: sum('total'), gst_approved: sum('gst_approved'), items: out.reduce((s, r) => s + r.items, 0) },
+    note: 'Amounts in INR. "pending" = submitted or being revised, awaiting approval; drafts and rejected reports are excluded. ' +
+      '"gst_approved" = GST on approved expenses (claimable input credit).',
   };
+}
+
+// ---------- Department budgets (monthly). Finance sets them; managers see their own departments. ----------
+export const currentMonth = () => new Date().toISOString().slice(0, 7);
+const monthRange = (month) => {
+  const [y, m] = month.split('-').map(Number);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  return { from: iso(new Date(Date.UTC(y, m - 1, 1))), to: iso(new Date(Date.UTC(y, m, 0))) };
+};
+
+export async function budgetStatus(user, { month, statuses } = {}) {
+  if (user.role === 'employee') throw new AppError('Department budgets are visible to managers and Finance only.');
+  const mon = month || currentMonth();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mon)) throw new AppError('month must be YYYY-MM.', 400);
+  const st = dbStatuses(statuses);
+  const { where, params, p, scope, depts } = await scopeFor(user, {});
+  const { from, to } = monthRange(mon);
+  where.push(`r.status = ANY(${p(st.db)})`, `e.spent_on >= ${p(from)}`, `e.spent_on <= ${p(to)}`);
+  const spend = (await q(
+    `SELECT u.department AS dept,
+            COALESCE(SUM(e.amount) FILTER (WHERE r.status = 'approved'), 0) AS approved,
+            COALESCE(SUM(e.amount) FILTER (WHERE r.status IN ('submitted','revising')), 0) AS pending
+       FROM expenses e JOIN reports r ON r.id = e.report_id JOIN users u ON u.id = r.owner_id
+      WHERE ${where.join(' AND ')} GROUP BY u.department`,
+    params
+  )).rows;
+  const deptList = depts || (await q(`SELECT DISTINCT department FROM users WHERE role = 'employee' ORDER BY department`)).rows.map((r) => r.department);
+  const budgets = Object.fromEntries((await q(`SELECT department, monthly_amount FROM budgets`)).rows.map((b) => [b.department, b.monthly_amount]));
+  const rows = deptList.map((d) => {
+    const s = spend.find((x) => x.dept === d) || { approved: 0, pending: 0 };
+    const used = round2(s.approved + s.pending);
+    const budget = budgets[d] ?? null;
+    const pct = budget ? Math.round((used / budget) * 100) : null;
+    const state = budget == null ? 'no budget' : pct > 100 ? 'over' : pct >= 80 ? 'near limit' : 'ok';
+    return { department: d, budget, approved: s.approved, pending: s.pending, used, remaining: budget == null ? null : round2(budget - used), pct_used: pct, state };
+  });
+  return { scope, month: mon, statuses: st.keys, rows, note: 'Monthly budget per department vs spend dated in that month (selected statuses). "near limit" = 80% or more.' };
+}
+
+export async function setBudget(user, department, amount) {
+  if (user.role !== 'finance') throw new AppError('Access denied: only Finance can set department budgets.');
+  const d = (await q(`SELECT DISTINCT department FROM users WHERE role = 'employee' AND lower(department) = lower($1)`, [String(department ?? '').trim()])).rows[0];
+  if (!d) throw new AppError(`Unknown department "${department}".`, 400);
+  const amt = Math.round(Number(amount) * 100) / 100;
+  if (!(amt >= 0) || amt > 100000000) throw new AppError('Budget must be a number between 0 and 10,00,00,000 INR.', 400);
+  await q(
+    `INSERT INTO budgets (department, monthly_amount, updated_by, updated_at) VALUES ($1, $2, $3, now())
+     ON CONFLICT (department) DO UPDATE SET monthly_amount = EXCLUDED.monthly_amount, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+    [d.department, amt, user.id]
+  );
+  return { department: d.department, monthly_amount: amt };
+}
+
+// ---------- Policy compliance by department (no names) ----------
+export async function complianceSummary(user, { from, to, statuses } = {}) {
+  if (user.role === 'employee') throw new AppError('Compliance by department is visible to managers and Finance only.');
+  const st = dbStatuses(statuses);
+  const base = await scopeFor(user, {});
+  base.where.push(`r.status = ANY(${base.p(st.db)})`);
+  const lineWhere = [...base.where];
+  const lp = [...base.params];
+  const lpush = (v) => { lp.push(v); return `$${lp.length}`; };
+  if (from) lineWhere.push(`e.spent_on >= ${lpush(from)}`);
+  if (to) lineWhere.push(`e.spent_on <= ${lpush(to)}`);
+  const lines = (await q(
+    `SELECT u.department AS dept, COUNT(DISTINCT r.id)::int AS reports, COUNT(e.id)::int AS lines,
+            COUNT(e.id) FILTER (WHERE e.policy_flag IS NOT NULL)::int AS policy_lines,
+            COALESCE(SUM(e.amount) FILTER (WHERE e.policy_flag IS NOT NULL), 0) AS policy_value,
+            COALESCE(SUM(e.amount), 0) AS total
+       FROM expenses e JOIN reports r ON r.id = e.report_id JOIN users u ON u.id = r.owner_id
+      WHERE ${lineWhere.join(' AND ')} GROUP BY u.department ORDER BY u.department`,
+    lp
+  )).rows;
+  const flags = (await q(
+    `SELECT u.department AS dept, COUNT(*) FILTER (WHERE f.resolved_at IS NULL)::int AS open_flags, COUNT(*)::int AS all_flags
+       FROM flags f JOIN reports r ON r.id = f.report_id JOIN users u ON u.id = r.owner_id
+      WHERE ${base.where.join(' AND ')} GROUP BY u.department`,
+    base.params
+  )).rows;
+  const depts = [...new Set([...lines.map((l) => l.dept), ...flags.map((f) => f.dept)])].sort();
+  const rows = depts.map((d) => {
+    const l = lines.find((x) => x.dept === d) || { reports: 0, lines: 0, policy_lines: 0, policy_value: 0, total: 0 };
+    const f = flags.find((x) => x.dept === d) || { open_flags: 0, all_flags: 0 };
+    return {
+      department: d, reports: l.reports, lines: l.lines, policy_breaches: l.policy_lines, policy_breach_value: l.policy_value,
+      pct_lines_breaching: l.lines ? Math.round((l.policy_lines / l.lines) * 100) : 0, review_flags: f.all_flags, open_review_flags: f.open_flags,
+    };
+  });
+  return {
+    scope: base.scope, statuses: st.keys, filters: { from: from || null, to: to || null }, rows,
+    note: 'policy_breaches = lines over a company limit (checked by the app). review_flags = issues raised in review, often by Claude.',
+  };
+}
+
+// ---------- GST input credit, for the accountant (Finance only) ----------
+export async function gstLedger(user, { from, to } = {}) {
+  if (user.role !== 'finance') throw new AppError('Access denied: the GST ledger is for Finance.');
+  const params = [];
+  const where = [`r.status = 'approved'`, `u.role = 'employee'`];
+  if (from) { params.push(from); where.push(`e.spent_on >= $${params.length}`); }
+  if (to) { params.push(to); where.push(`e.spent_on <= $${params.length}`); }
+  return (await q(
+    `SELECT to_char(e.spent_on, 'YYYY-MM') AS month, u.department, e.category,
+            SUM(e.amount) AS amount, SUM(e.gst) AS gst, COUNT(*)::int AS lines
+       FROM expenses e JOIN reports r ON r.id = e.report_id JOIN users u ON u.id = r.owner_id
+      WHERE ${where.join(' AND ')}
+      GROUP BY 1, 2, 3 ORDER BY 1 DESC, 2, 3`,
+    params
+  )).rows;
 }
