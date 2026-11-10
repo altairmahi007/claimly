@@ -1,4 +1,5 @@
 import { CATEGORIES, FLAG_KINDS, LIMITS } from './policy.js';
+import { recentQuarters } from './access.js';
 
 export const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -111,10 +112,11 @@ ${showOwner ? `<td>${esc(r.owner_name)}<div class="muted">${esc(r.department)}</
 }
 
 const PERIODS = [['all', 'All time'], ['this_month', 'This month'], ['last_month', 'Last month'], ['last_90', 'Last 90 days']];
-const qs = ({ period, show }) => {
+const qs = ({ period, show, bq }) => {
   const parts = [];
   if (period && period !== 'all') parts.push(`period=${period}`);
   if (show && show.length === 1) parts.push(`show=${show[0]}`);
+  if (bq) parts.push(`bq=${bq}`);
   return parts.length ? `/?${parts.join('&')}` : '/';
 };
 export const periodTabs = (current, show) =>
@@ -138,31 +140,51 @@ function statusToggles({ totals, show, period }) {
 const filterNote = (show) => (show.length === 1
   ? `<div class="alert ok" style="background:#eef0f6;color:#334">Showing <b>${show[0] === 'approved' ? 'approved' : 'pending'}</b> only. <a href="/">Show both</a></div>` : '');
 
-// Budget grading: the bar colour follows % used; the whole row turns amber at 80% and red over 100%.
+// Budget grading on approved + pending: the % and status follow the grade; the whole row turns amber at 80% and red over 100%.
+const BAR_APPROVED = '#3b4cca';
+const BAR_PENDING = 'repeating-linear-gradient(45deg,#a9b3f0 0 6px,#c8cff7 6px 12px)';
 const BUDGET_GRADE = {
   ok: { bar: '#11804a', chip: 'background:#dcf5e6;color:#11683a', label: 'On track', row: '' },
   watch: { bar: '#d4a106', chip: 'background:#fff7cc;color:#7a5d00', label: 'Watch', row: '' },
   'near limit': { bar: '#e08a00', chip: 'background:#ffe3b8;color:#8a4b00', label: 'Near limit', row: 'background:#fff4e2' },
   over: { bar: '#c62828', chip: 'background:#fbd0d0;color:#9a1515', label: 'Over budget', row: 'background:#fde8e8' },
 };
+// Card title with a quarter dropdown (Indian FY quarters), keeping the other dashboard filters.
+function budgetHeader(title, b, { period, show }) {
+  const quarters = recentQuarters(6);
+  if (!quarters.some((x) => x.key === b.quarter)) quarters.push({ key: b.quarter, label: b.quarter_label });
+  const cur = quarters[0].key;
+  const opts = quarters.map((x) => `<option value="${esc(qs({ period, show, bq: x.key === cur ? undefined : x.key }))}"${x.key === b.quarter ? ' selected' : ''}>${esc(x.label)}${x.key === cur ? ' · current' : ''}</option>`).join('');
+  return `<div class="row"><h2 style="margin:0">${esc(title)}</h2><div class="spacer"></div>
+<label class="muted" style="font-size:13px">Quarter <select onchange="location.href=this.value" style="width:auto;margin-left:6px">${opts}</select></label></div><div style="height:10px"></div>`;
+}
+
 function budgetTable(b, { editable = false } = {}) {
+  // (month navigation is rendered by budgetHeader)
   if (!b.rows.length) return '<p class="muted">No departments yet.</p>';
+  // Stacked bar: approved (solid) + pending (light, striped). The threshold uses their sum.
+  // When spend passes the budget, the bar is scaled to the spend and a line marks the budget.
   const usedCell = (r) => {
     if (r.budget == null) return `<td class="n">${inr(r.used)}<div class="muted">no budget set</div></td>`;
     const g = BUDGET_GRADE[r.state];
-    return `<td style="min-width:220px"><div class="row" style="justify-content:space-between;gap:6px;font-size:14px">
+    const scale = Math.max(r.budget, r.used) || 1;
+    const w = (v) => `${Math.max(0, (v / scale) * 100).toFixed(2)}%`;
+    return `<td style="min-width:240px"><div class="row" style="justify-content:space-between;gap:6px;font-size:14px">
 <span><b>${inr(r.used)}</b> <span class="muted">of ${inr(r.budget)}</span></span><b style="color:${g.bar}">${r.pct_used}%</b></div>
-<div style="position:relative;background:#e8eaf2;border-radius:99px;height:8px;margin-top:5px;overflow:hidden">
-<div style="width:${Math.min(r.pct_used, 100)}%;background:${g.bar};height:8px;border-radius:99px"></div>
-<div style="position:absolute;left:80%;top:0;bottom:0;width:1px;background:#00000033" title="80% threshold"></div></div></td>`;
+<div style="position:relative;background:#e8eaf2;border-radius:99px;height:10px;margin-top:5px;overflow:hidden;display:flex">
+<div title="Approved ${inr(r.approved)}" style="width:${w(r.approved)};background:${BAR_APPROVED};height:10px"></div>
+<div title="Pending ${inr(r.pending)}" style="width:${w(r.pending)};background:${BAR_PENDING};height:10px"></div>
+<div title="80% of budget" style="position:absolute;left:${w(r.budget * 0.8)};top:0;bottom:0;width:1px;background:#00000040"></div>
+${r.used > r.budget ? `<div title="Budget" style="position:absolute;left:${w(r.budget)};top:-2px;bottom:-2px;width:2px;background:#9a1515"></div>` : ''}</div>
+<div class="muted" style="font-size:12px;margin-top:3px"><span style="color:${BAR_APPROVED}">■</span> ${inr(r.approved)} approved · <span style="color:#7d8ad8">■</span> ${inr(r.pending)} pending</div></td>`;
   };
   const statusCell = (r) => (r.budget == null ? '<span class="muted">No budget</span>' : `<span class="chip" style="${BUDGET_GRADE[r.state].chip}">${BUDGET_GRADE[r.state].label}</span>`);
-  return `<table><thead><tr><th>Department</th><th class="n">Budget / month</th><th>Spent vs budget</th><th class="n">Left</th><th>Status</th></tr></thead><tbody>
+  return `<table><thead><tr><th>Department</th><th class="n">Budget / quarter</th><th>Spent vs budget</th><th class="n">Left</th><th>Status</th></tr></thead><tbody>
 ${b.rows.map((r) => `<tr style="${r.budget == null ? '' : BUDGET_GRADE[r.state].row}"><td><b>${esc(r.department)}</b></td>
 <td class="n">${editable ? `<form method="post" action="/budgets" class="row" style="justify-content:flex-end;gap:6px"><input type="hidden" name="department" value="${esc(r.department)}">
-<input name="amount" type="number" min="0" step="1000" value="${r.budget ?? ''}" placeholder="Set" style="width:110px"><button class="btn sm">Save</button></form>` : r.budget == null ? '—' : inr(r.budget)}</td>
+<input name="amount" type="number" min="0" step="1000" value="${r.budget ?? ''}" placeholder="Set" style="width:120px"><button class="btn sm">Save</button></form>` : r.budget == null ? '—' : inr(r.budget)}</td>
 ${usedCell(r)}<td class="n">${r.remaining == null ? '—' : r.remaining < 0 ? `<b style="color:#9a1515">−${inr(-r.remaining)}</b>` : inr(r.remaining)}</td><td>${statusCell(r)}</td></tr>`).join('')}
-</tbody></table><p class="muted">Spend dated in ${esc(b.month)}, ${b.statuses.length === 2 ? 'approved + pending' : b.statuses[0] + ' only'}.
+</tbody></table><p class="muted">Spend dated in ${esc(b.quarter_label)}, ${b.statuses.length === 2 ? 'approved + pending (the threshold uses both)' : b.statuses[0] + ' only'}. Bar: dark = approved, striped = pending; thin line = 80%.<br>
 <span class="chip" style="${BUDGET_GRADE.ok.chip}">under 60%</span> <span class="chip" style="${BUDGET_GRADE.watch.chip}">60–79%</span>
 <span class="chip" style="${BUDGET_GRADE['near limit'].chip}">80–100%: row turns amber</span> <span class="chip" style="${BUDGET_GRADE.over.chip}">over 100%: row turns red</span></p>`;
 }
@@ -198,7 +220,7 @@ export function managerDashboard({ user, team, pending, all, byDept, byPerson, t
 <div class="kpis"><div class="kpi"><div class="l">Waiting for you</div><div class="v">${pending.filter((r) => r.status === 'submitted').length}</div></div>${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">Departments</div><div class="v">${esc(depts.join(', '))}</div></div></div>
 ${filterNote(show)}
 ${show.includes('pending') ? `<div class="card"><h2>Waiting for your approval</h2><p class="muted">Reports marked <b>Being revised</b> were reopened by the employee: you can read them, but approval waits until they resubmit.<br>⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>` : ''}
-<div class="card"><h2>Budget this month</h2>${budgetTable(budgets)}</div>
+<div class="card">${budgetHeader('Budget', budgets, { period, show })}${budgetTable(budgets)}</div>
 <div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period, show)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By reportee</h2>${summaryTable(byPerson, 'Person')}</div></div>
@@ -214,7 +236,7 @@ export function financeDashboard({ user, byDept, byManager, byCategory, byMonth,
 <div class="guard">🔒 Finance sees department totals only. Individual employees and their reports are hidden by design.</div>
 <div class="kpis">${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">GST input credit</div><div class="v">${inr(totals.totals.gst_approved)}</div><div class="muted" style="font-size:12px">on approved spend</div></div><div class="kpi"><div class="l">Departments</div><div class="v">${byDept.rows.length}</div></div></div>
 ${filterNote(show)}
-<div class="card"><div class="row"><h2>Department budgets (${esc(budgets.month)})</h2></div>${budgetTable(budgets, { editable: true })}</div>
+<div class="card">${budgetHeader('Department budgets', budgets, { period, show })}${budgetTable(budgets, { editable: true })}</div>
 <div class="row" style="margin-bottom:10px"><div class="spacer"></div>${periodTabs(period, show)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By approving manager</h2>${summaryTable(byManager, 'Manager')}<p class="muted">Spend from each manager's team. Team totals only, no individual employees.</p></div></div>

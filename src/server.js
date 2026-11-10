@@ -107,7 +107,8 @@ app.get('/', requireLogin, h(async (req, res) => {
   const show = parseShow(req.query.show);
   const statuses = show;
   const listStatuses = show.length === 2 ? undefined : show; // both on = every report, incl. drafts/rejected
-  const view = { user, period, show, flash: req.query.msg };
+  const bq = /^\d{4}-(01|04|07|10)$/.test(req.query.bq || '') ? req.query.bq : undefined; // budget card quarter (start month)
+  const view = { user, period, show, bq, flash: req.query.msg };
   if (user.role === 'employee') {
     const [reports, byCategory, totals] = await Promise.all([
       listReports(user, { statuses: listStatuses }),
@@ -123,7 +124,7 @@ app.get('/', requireLogin, h(async (req, res) => {
       spendSummary(user, { group_by: 'department', ...range, statuses }),
       spendSummary(user, { group_by: 'person', ...range, statuses }),
       spendSummary(user, { group_by: 'department', ...range }),
-      budgetStatus(user, { statuses }),
+      budgetStatus(user, { statuses, quarter: bq }),
       complianceSummary(user, { ...range, statuses }),
     ]);
     const pending = all.filter((r) => ['submitted', 'revising'].includes(r.status));
@@ -135,7 +136,7 @@ app.get('/', requireLogin, h(async (req, res) => {
     spendSummary(user, { group_by: 'category', ...range, statuses }),
     spendSummary(user, { group_by: 'month', ...range, statuses }),
     spendSummary(user, { group_by: 'department', ...range }),
-    budgetStatus(user, { statuses }),
+    budgetStatus(user, { statuses, quarter: bq }),
     complianceSummary(user, { ...range, statuses }),
   ]);
   res.send(V.financeDashboard({ ...view, byDept, byManager, byCategory, byMonth, totals, budgets, compliance }));
@@ -144,7 +145,7 @@ app.get('/', requireLogin, h(async (req, res) => {
 // ---------- Finance: budgets and GST ----------
 app.post('/budgets', requireLogin, h(async (req, res) => {
   const b = await setBudget(req.user, req.body.department, req.body.amount);
-  back(res, '/', `${b.department} budget set to ₹${b.monthly_amount.toLocaleString('en-IN')}/month.`);
+  back(res, '/', `${b.department} budget set to ₹${b.quarterly_amount.toLocaleString('en-IN')} per quarter.`);
 }));
 app.get('/finance/gst.csv', requireLogin, h(async (req, res) => {
   const range = periodRange(req.query.period);

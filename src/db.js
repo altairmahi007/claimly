@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS comments (
 );
 CREATE TABLE IF NOT EXISTS budgets (
   department     TEXT PRIMARY KEY,
-  monthly_amount NUMERIC(12,2) NOT NULL CHECK (monthly_amount >= 0),
+  monthly_amount NUMERIC(12,2),                -- legacy (budgets were monthly at first)
+  quarterly_amount NUMERIC(14,2) CHECK (quarterly_amount >= 0),
   updated_by     INTEGER REFERENCES users(id),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -142,8 +143,12 @@ export async function initDb() {
   const { rows } = await q('SELECT COUNT(*)::int AS n FROM users');
   if (rows[0].n === 0) await seedCompany();
   await ensureSecondMiddlewareEngineer();
-  // Starting monthly budgets for the demo departments (Finance can change them; existing values are kept).
-  await q(`INSERT INTO budgets (department, monthly_amount) VALUES ('UI', 60000), ('Backend', 60000), ('Middleware', 50000)
+  // Budgets are per quarter. Older databases stored monthly budgets: convert them once (x3).
+  await q(`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS quarterly_amount NUMERIC(14,2) CHECK (quarterly_amount >= 0);
+           ALTER TABLE budgets ALTER COLUMN monthly_amount DROP NOT NULL;
+           UPDATE budgets SET quarterly_amount = monthly_amount * 3 WHERE quarterly_amount IS NULL AND monthly_amount IS NOT NULL`);
+  // Starting quarterly budgets for the demo departments (Finance can change them; existing values are kept).
+  await q(`INSERT INTO budgets (department, quarterly_amount) VALUES ('UI', 180000), ('Backend', 180000), ('Middleware', 150000)
            ON CONFLICT (department) DO NOTHING`);
 }
 

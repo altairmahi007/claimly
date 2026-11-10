@@ -28,7 +28,7 @@ export function describeAccess(user, team = []) {
     const depts = [...new Set(team.map((t) => t.department))];
     return `You can see and approve reports from your direct reportees (${team.map((t) => t.name).join(', ') || 'none'}) and see spend for your departments (${depts.join(', ') || 'none'}), by department or by person, plus your departments' budgets and policy compliance. You cannot see other teams.`;
   }
-  return 'You can see department-level spend across the company (by department, approving manager, category or month), set monthly department budgets, track policy compliance by department and pull the GST input-credit ledger. Individual reports and per-person spend are hidden from Finance by design.';
+  return 'You can see department-level spend across the company (by department, approving manager, category or month), set quarterly department budgets, track policy compliance by department and pull the GST input-credit ledger. Individual reports and per-person spend are hidden from Finance by design.';
 }
 
 // Managers see a reportee's report only once it has been submitted: drafts are private to the employee.
@@ -181,22 +181,46 @@ export async function spendSummary(user, { group_by = 'category', department, pe
   };
 }
 
-// ---------- Department budgets (monthly). Finance sets them; managers see their own departments. ----------
-export const currentMonth = () => new Date().toISOString().slice(0, 7);
-const monthRange = (month) => {
-  const [y, m] = month.split('-').map(Number);
-  const iso = (d) => d.toISOString().slice(0, 10);
-  return { from: iso(new Date(Date.UTC(y, m - 1, 1))), to: iso(new Date(Date.UTC(y, m, 0))) };
-};
+// ---------- Department budgets (per quarter). Finance sets them; managers see their own departments. ----------
+// Quarters follow the Indian financial year: Q1 = Apr–Jun, Q2 = Jul–Sep, Q3 = Oct–Dec, Q4 = Jan–Mar.
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// Any 'YYYY-MM' or 'YYYY-MM-DD' (default: today) -> the quarter containing it.
+export function quarterOf(when) {
+  const v = String(when || new Date().toISOString().slice(0, 10));
+  const m = v.match(/^(\d{4})-(0[1-9]|1[0-2])(-\d{2})?$/);
+  if (!m) throw new AppError('quarter must be a month (YYYY-MM) or date (YYYY-MM-DD) inside the quarter.', 400);
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const startMonth = mo - ((mo - 1) % 3); // 1, 4, 7, 10
+  const end = new Date(Date.UTC(y, startMonth + 2, 0));
+  const fyStart = startMonth >= 4 ? y : y - 1;
+  const qn = { 4: 1, 7: 2, 10: 3, 1: 4 }[startMonth];
+  const key = `${y}-${String(startMonth).padStart(2, '0')}`;
+  return {
+    key,
+    from: `${key}-01`,
+    to: end.toISOString().slice(0, 10),
+    label: `${MON[startMonth - 1]}–${MON[startMonth + 1]} ${y} (Q${qn} FY ${fyStart}-${String(fyStart + 1).slice(2)})`,
+  };
+}
+// The current quarter and the ones before it, newest first (for the dropdown).
+export function recentQuarters(n = 6) {
+  const out = [];
+  let q0 = quarterOf();
+  for (let i = 0; i < n; i++) {
+    out.push(q0);
+    const [y, m] = q0.key.split('-').map(Number);
+    q0 = quarterOf(new Date(Date.UTC(y, m - 4, 1)).toISOString().slice(0, 7));
+  }
+  return out;
+}
 
-export async function budgetStatus(user, { month, statuses } = {}) {
+export async function budgetStatus(user, { quarter, statuses } = {}) {
   if (user.role === 'employee') throw new AppError('Department budgets are visible to managers and Finance only.');
-  const mon = month || currentMonth();
-  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mon)) throw new AppError('month must be YYYY-MM.', 400);
+  const qtr = quarterOf(quarter);
   const st = dbStatuses(statuses);
   const { where, params, p, scope, depts } = await scopeFor(user, {});
-  const { from, to } = monthRange(mon);
-  where.push(`r.status = ANY(${p(st.db)})`, `e.spent_on >= ${p(from)}`, `e.spent_on <= ${p(to)}`);
+  where.push(`r.status = ANY(${p(st.db)})`, `e.spent_on >= ${p(qtr.from)}`, `e.spent_on <= ${p(qtr.to)}`);
   const spend = (await q(
     `SELECT u.department AS dept,
             COALESCE(SUM(e.amount) FILTER (WHERE r.status = 'approved'), 0) AS approved,
@@ -206,7 +230,7 @@ export async function budgetStatus(user, { month, statuses } = {}) {
     params
   )).rows;
   const deptList = depts || (await q(`SELECT DISTINCT department FROM users WHERE role = 'employee' ORDER BY department`)).rows.map((r) => r.department);
-  const budgets = Object.fromEntries((await q(`SELECT department, monthly_amount FROM budgets`)).rows.map((b) => [b.department, b.monthly_amount]));
+  const budgets = Object.fromEntries((await q(`SELECT department, quarterly_amount FROM budgets WHERE quarterly_amount IS NOT NULL`)).rows.map((b) => [b.department, b.quarterly_amount]));
   const rows = deptList.map((d) => {
     const s = spend.find((x) => x.dept === d) || { approved: 0, pending: 0 };
     const used = round2(s.approved + s.pending);
@@ -215,7 +239,10 @@ export async function budgetStatus(user, { month, statuses } = {}) {
     const state = budget == null ? 'no budget' : pct > 100 ? 'over' : pct >= 80 ? 'near limit' : pct >= 60 ? 'watch' : 'ok';
     return { department: d, budget, approved: s.approved, pending: s.pending, used, remaining: budget == null ? null : round2(budget - used), pct_used: pct, state };
   });
-  return { scope, month: mon, statuses: st.keys, rows, note: 'Monthly budget per department vs spend dated in that month (selected statuses). States: ok (<60%), watch (60-79%), near limit (80-100%), over (>100%).' };
+  return {
+    scope, quarter: qtr.key, quarter_label: qtr.label, from: qtr.from, to: qtr.to, statuses: st.keys, rows,
+    note: 'Quarterly budget per department vs spend dated in that quarter (approved + pending unless filtered). States: ok (<60%), watch (60-79%), near limit (80-100%), over (>100%).',
+  };
 }
 
 export async function setBudget(user, department, amount) {
@@ -223,13 +250,13 @@ export async function setBudget(user, department, amount) {
   const d = (await q(`SELECT DISTINCT department FROM users WHERE role = 'employee' AND lower(department) = lower($1)`, [String(department ?? '').trim()])).rows[0];
   if (!d) throw new AppError(`Unknown department "${department}".`, 400);
   const amt = Math.round(Number(amount) * 100) / 100;
-  if (!(amt >= 0) || amt > 100000000) throw new AppError('Budget must be a number between 0 and 10,00,00,000 INR.', 400);
+  if (!(amt >= 0) || amt > 1000000000) throw new AppError('Budget must be a number between 0 and 1,00,00,00,000 INR.', 400);
   await q(
-    `INSERT INTO budgets (department, monthly_amount, updated_by, updated_at) VALUES ($1, $2, $3, now())
-     ON CONFLICT (department) DO UPDATE SET monthly_amount = EXCLUDED.monthly_amount, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+    `INSERT INTO budgets (department, quarterly_amount, updated_by, updated_at) VALUES ($1, $2, $3, now())
+     ON CONFLICT (department) DO UPDATE SET quarterly_amount = EXCLUDED.quarterly_amount, updated_by = EXCLUDED.updated_by, updated_at = now()`,
     [d.department, amt, user.id]
   );
-  return { department: d.department, monthly_amount: amt };
+  return { department: d.department, quarterly_amount: amt };
 }
 
 // ---------- Policy compliance by department (no names) ----------

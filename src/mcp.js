@@ -310,10 +310,10 @@ export function buildMcpServer(user, baseUrl) {
     'get_budget_status',
     {
       title: 'Department budgets',
-      description: 'Monthly budget vs spend per department (approved + pending by default), with % used and remaining, and a state: ok, near limit (80%+), over, or no budget. ' +
+      description: 'Quarterly budget vs spend per department (approved + pending by default), with % used and remaining, and a state: ok (<60%), watch (60-79%), near limit (80-100%), over (>100%), or no budget. Quarters follow the Indian financial year (Q1 = Apr–Jun). ' +
         'Finance: all departments. Managers: their own departments. Employees: not available.',
       inputSchema: {
-        month: z.string().regex(/^\d{4}-\d{2}$/).optional().describe('YYYY-MM, default this month'),
+        quarter: z.string().regex(/^\d{4}-\d{2}(-\d{2})?$/).optional().describe('Any month (YYYY-MM) or date inside the quarter; default the current quarter'),
         statuses: z.array(z.enum(['approved', 'pending'])).optional(),
       },
     },
@@ -324,12 +324,12 @@ export function buildMcpServer(user, baseUrl) {
     'set_department_budget',
     {
       title: 'Set a department budget',
-      description: 'Finance only: set the monthly budget for a department in INR. Only do this when the user explicitly asks.',
-      inputSchema: { department: z.string().min(1), monthly_amount: z.number().min(0) },
+      description: 'Finance only: set the quarterly budget for a department in INR (the same amount applies to every quarter). Only do this when the user explicitly asks.',
+      inputSchema: { department: z.string().min(1), quarterly_amount: z.number().min(0) },
     },
-    run(async ({ department, monthly_amount }) => {
-      const b = await setBudget(user, department, monthly_amount);
-      return reply(`${b.department} budget set to ₹${b.monthly_amount.toLocaleString('en-IN')} per month. ${baseUrl}/`);
+    run(async ({ department, quarterly_amount }) => {
+      const b = await setBudget(user, department, quarterly_amount);
+      return reply(`${b.department} budget set to ₹${b.quarterly_amount.toLocaleString('en-IN')} per quarter. ${baseUrl}/`);
     })
   );
 
