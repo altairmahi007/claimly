@@ -212,10 +212,10 @@ export async function budgetStatus(user, { month, statuses } = {}) {
     const used = round2(s.approved + s.pending);
     const budget = budgets[d] ?? null;
     const pct = budget ? Math.round((used / budget) * 100) : null;
-    const state = budget == null ? 'no budget' : pct > 100 ? 'over' : pct >= 80 ? 'near limit' : 'ok';
+    const state = budget == null ? 'no budget' : pct > 100 ? 'over' : pct >= 80 ? 'near limit' : pct >= 60 ? 'watch' : 'ok';
     return { department: d, budget, approved: s.approved, pending: s.pending, used, remaining: budget == null ? null : round2(budget - used), pct_used: pct, state };
   });
-  return { scope, month: mon, statuses: st.keys, rows, note: 'Monthly budget per department vs spend dated in that month (selected statuses). "near limit" = 80% or more.' };
+  return { scope, month: mon, statuses: st.keys, rows, note: 'Monthly budget per department vs spend dated in that month (selected statuses). States: ok (<60%), watch (60-79%), near limit (80-100%), over (>100%).' };
 }
 
 export async function setBudget(user, department, amount) {

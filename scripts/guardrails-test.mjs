@@ -223,6 +223,12 @@ ok(!setB.isError && /UI budget set to ₹75,000/.test(setB.text), 'mcp: finance 
 const riaB = await tool(ria.token, 'get_budget_status', {});
 ok(!riaB.isError && /"budget": 75000/.test(riaB.text) && /"Backend"/.test(riaB.text) && !/Middleware/.test(riaB.text), 'mcp: Ria sees only UI + Backend budgets, with the new value');
 ok((await tool(ashish.token, 'set_department_budget', { department: 'Marketing', monthly_amount: 1000 })).isError, 'mcp: unknown department refused');
+await tool(ashish.token, 'set_department_budget', { department: 'Middleware', monthly_amount: 1000 });
+const overB = await tool(ashish.token, 'get_budget_status', {});
+ok(/"department": "Middleware"[^}]*"state": "over"/.test(overB.text), 'mcp: Middleware over budget -> state "over"', overB.text.slice(0, 600));
+const overPage = (await web(ashish.cookie, '/')).text;
+ok(/<tr style="background:#fde8e8"><td><b>Middleware/.test(overPage) && /Over budget/.test(overPage), 'web: over-budget row is tinted red');
+await tool(ashish.token, 'set_department_budget', { department: 'Middleware', monthly_amount: 50000 });
 ok((await form(ashish.cookie, '/budgets', { department: 'Backend', amount: '65000' })).status === 302, 'web: finance saves a budget');
 ok((await form(ria.cookie, '/budgets', { department: 'Backend', amount: '1' })).status === 403, 'web: manager cannot save a budget');
 const ashC = await tool(ashish.token, 'get_compliance_summary', {});

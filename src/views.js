@@ -138,21 +138,33 @@ function statusToggles({ totals, show, period }) {
 const filterNote = (show) => (show.length === 1
   ? `<div class="alert ok" style="background:#eef0f6;color:#334">Showing <b>${show[0] === 'approved' ? 'approved' : 'pending'}</b> only. <a href="/">Show both</a></div>` : '');
 
+// Budget grading: the bar colour follows % used; the whole row turns amber at 80% and red over 100%.
+const BUDGET_GRADE = {
+  ok: { bar: '#11804a', chip: 'background:#dcf5e6;color:#11683a', label: 'On track', row: '' },
+  watch: { bar: '#d4a106', chip: 'background:#fff7cc;color:#7a5d00', label: 'Watch', row: '' },
+  'near limit': { bar: '#e08a00', chip: 'background:#ffe3b8;color:#8a4b00', label: 'Near limit', row: 'background:#fff4e2' },
+  over: { bar: '#c62828', chip: 'background:#fbd0d0;color:#9a1515', label: 'Over budget', row: 'background:#fde8e8' },
+};
 function budgetTable(b, { editable = false } = {}) {
   if (!b.rows.length) return '<p class="muted">No departments yet.</p>';
-  const bar = (pct, state) => {
-    const color = state === 'over' ? '#c62828' : state === 'near limit' ? '#e08a00' : '#11804a';
-    return pct == null ? '' : `<div style="background:#eef0f6;border-radius:99px;height:6px;margin-top:4px"><div style="width:${Math.min(pct, 100)}%;background:${color};height:6px;border-radius:99px"></div></div>`;
+  const usedCell = (r) => {
+    if (r.budget == null) return `<td class="n">${inr(r.used)}<div class="muted">no budget set</div></td>`;
+    const g = BUDGET_GRADE[r.state];
+    return `<td style="min-width:220px"><div class="row" style="justify-content:space-between;gap:6px;font-size:14px">
+<span><b>${inr(r.used)}</b> <span class="muted">of ${inr(r.budget)}</span></span><b style="color:${g.bar}">${r.pct_used}%</b></div>
+<div style="position:relative;background:#e8eaf2;border-radius:99px;height:8px;margin-top:5px;overflow:hidden">
+<div style="width:${Math.min(r.pct_used, 100)}%;background:${g.bar};height:8px;border-radius:99px"></div>
+<div style="position:absolute;left:80%;top:0;bottom:0;width:1px;background:#00000033" title="80% threshold"></div></div></td>`;
   };
-  const stateChip = (st) => (st === 'over' ? '<span class="chip warn" style="background:#fde2e2;color:#a11d1d">Over budget</span>'
-    : st === 'near limit' ? '<span class="chip warn">Near limit</span>' : st === 'ok' ? '<span class="chip">On track</span>' : '<span class="muted">No budget</span>');
-  return `<table><thead><tr><th>Department</th><th class="n">Budget / month</th><th class="n">Used</th><th class="n">Left</th><th>Status</th></tr></thead><tbody>
-${b.rows.map((r) => `<tr><td><b>${esc(r.department)}</b></td>
+  const statusCell = (r) => (r.budget == null ? '<span class="muted">No budget</span>' : `<span class="chip" style="${BUDGET_GRADE[r.state].chip}">${BUDGET_GRADE[r.state].label}</span>`);
+  return `<table><thead><tr><th>Department</th><th class="n">Budget / month</th><th>Spent vs budget</th><th class="n">Left</th><th>Status</th></tr></thead><tbody>
+${b.rows.map((r) => `<tr style="${r.budget == null ? '' : BUDGET_GRADE[r.state].row}"><td><b>${esc(r.department)}</b></td>
 <td class="n">${editable ? `<form method="post" action="/budgets" class="row" style="justify-content:flex-end;gap:6px"><input type="hidden" name="department" value="${esc(r.department)}">
 <input name="amount" type="number" min="0" step="1000" value="${r.budget ?? ''}" placeholder="Set" style="width:110px"><button class="btn sm">Save</button></form>` : r.budget == null ? '—' : inr(r.budget)}</td>
-<td class="n">${inr(r.used)}${r.pct_used != null ? ` <span class="muted">(${r.pct_used}%)</span>` : ''}${bar(r.pct_used, r.state)}</td>
-<td class="n">${r.remaining == null ? '—' : inr(r.remaining)}</td><td>${stateChip(r.state)}</td></tr>`).join('')}
-</tbody></table><p class="muted">Spend dated in ${esc(b.month)}, ${b.statuses.length === 2 ? 'approved + pending' : b.statuses[0] + ' only'}. Amber at 80%, red over 100%.</p>`;
+${usedCell(r)}<td class="n">${r.remaining == null ? '—' : r.remaining < 0 ? `<b style="color:#9a1515">−${inr(-r.remaining)}</b>` : inr(r.remaining)}</td><td>${statusCell(r)}</td></tr>`).join('')}
+</tbody></table><p class="muted">Spend dated in ${esc(b.month)}, ${b.statuses.length === 2 ? 'approved + pending' : b.statuses[0] + ' only'}.
+<span class="chip" style="${BUDGET_GRADE.ok.chip}">under 60%</span> <span class="chip" style="${BUDGET_GRADE.watch.chip}">60–79%</span>
+<span class="chip" style="${BUDGET_GRADE['near limit'].chip}">80–100%: row turns amber</span> <span class="chip" style="${BUDGET_GRADE.over.chip}">over 100%: row turns red</span></p>`;
 }
 
 function complianceTable(c) {
