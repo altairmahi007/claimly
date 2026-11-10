@@ -3,12 +3,13 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { initDb, q } from './db.js';
 import { makeSession, newToken, parseCookies, readSession, verifyPassword } from './auth.js';
 import {
-  AppError, budgetStatus, complianceSummary, getTeam, getUserByEmail, getUserById, getUserByToken, gstLedger, setBudget, spendSummary,
+  AppError, budgetStatus, complianceSummary, getTeam, getUserByEmail, getUserById, getUserByToken, gstLedger, kpiSummary, setBudget, spendSummary,
 } from './access.js';
 import {
   addComment, addExpenses, addFlag, createReport, decideReport, deleteExpense, deleteReport, getReport, listReports, renameReport, resolveFlag,
-  startRevision, submitReport, updateExpense,
+  startRevision, submitReport, updateExpense, attention, delegationFor, markPaid, payoutQueue, setDelegate,
 } from './repo.js';
+import { policySummary } from './policy.js';
 import { buildMcpServer } from './mcp.js';
 import * as V from './views.js';
 
@@ -118,7 +119,7 @@ app.get('/', requireLogin, h(async (req, res) => {
     return res.send(V.employeeDashboard({ ...view, reports, byCategory, totals }));
   }
   if (user.role === 'manager') {
-    const [team, all, byDept, byPerson, totals, budgets, compliance] = await Promise.all([
+    const [team, all, byDept, byPerson, totals, budgets, compliance, delegated, delegation, kpis] = await Promise.all([
       getTeam(user.id),
       listReports(user, { scope: 'team', statuses: listStatuses }),
       spendSummary(user, { group_by: 'department', ...range, statuses }),
@@ -126,11 +127,14 @@ app.get('/', requireLogin, h(async (req, res) => {
       spendSummary(user, { group_by: 'department', ...range }),
       budgetStatus(user, { statuses, quarter: bq }),
       complianceSummary(user, { ...range, statuses }),
+      listReports(user, { scope: 'delegated' }),
+      delegationFor(user),
+      kpiSummary(user, range),
     ]);
-    const pending = all.filter((r) => ['submitted', 'revising'].includes(r.status));
-    return res.send(V.managerDashboard({ ...view, team, pending, all, byDept, byPerson, totals, budgets, compliance }));
+    const pending = all.filter((r) => ['submitted', 'revising', 'finance_review'].includes(r.status));
+    return res.send(V.managerDashboard({ ...view, team, pending, all, byDept, byPerson, totals, budgets, compliance, delegated, delegation, kpis }));
   }
-  const [byDept, byManager, byCategory, byMonth, totals, budgets, compliance] = await Promise.all([
+  const [byDept, byManager, byCategory, byMonth, totals, budgets, compliance, financeReview, payouts, kpis] = await Promise.all([
     spendSummary(user, { group_by: 'department', ...range, statuses }),
     spendSummary(user, { group_by: 'manager', ...range, statuses }),
     spendSummary(user, { group_by: 'category', ...range, statuses }),
@@ -138,9 +142,24 @@ app.get('/', requireLogin, h(async (req, res) => {
     spendSummary(user, { group_by: 'department', ...range }),
     budgetStatus(user, { statuses, quarter: bq }),
     complianceSummary(user, { ...range, statuses }),
+    listReports(user, { scope: 'finance' }),
+    payoutQueue(user),
+    kpiSummary(user, range),
   ]);
-  res.send(V.financeDashboard({ ...view, byDept, byManager, byCategory, byMonth, totals, budgets, compliance }));
+  res.send(V.financeDashboard({ ...view, byDept, byManager, byCategory, byMonth, totals, budgets, compliance, financeReview, payouts, kpis }));
 }));
+
+// ---------- Payouts, out of office, policy ----------
+app.post('/reports/:id/paid', requireLogin, h(async (req, res) => {
+  const p = await markPaid(req.user, req.params.id, { paid_on: req.body.paid_on, mode: req.body.mode, ref: req.body.ref }, 'web');
+  back(res, '/', `Report #${p.report_id} marked paid to ${p.payee} via ${p.mode} on ${p.paid_on}.`);
+}));
+app.post('/delegate', requireLogin, h(async (req, res) => {
+  const d = await setDelegate(req.user, req.body.clear ? {} : { delegate: req.body.delegate, until: req.body.until });
+  back(res, '/', d.delegate ? `Out of office: approvals go to ${d.delegate} until ${d.until}.` : 'Back in office: approvals come to you again.');
+}));
+app.get('/policy', requireLogin, (req, res) => res.send(V.policyPage({ user: req.user, policy: policySummary() })));
+app.get('/attention', requireLogin, h(async (req, res) => res.send(V.attentionPage({ user: req.user, a: await attention(req.user, { budgetStatus }) }))));
 
 // ---------- Finance: budgets and GST ----------
 app.post('/budgets', requireLogin, h(async (req, res) => {

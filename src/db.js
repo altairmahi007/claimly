@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS reports (
   id            SERIAL PRIMARY KEY,
   owner_id      INTEGER NOT NULL REFERENCES users(id),
   title         TEXT NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','submitted','revising','approved','rejected')),
+  status        TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','submitted','revising','finance_review','approved','rejected')),
   created_via   TEXT NOT NULL DEFAULT 'web',
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -138,11 +138,23 @@ const seedReport = async (owner, title, status, decider, items) => {
 export async function initDb() {
   await q(SCHEMA);
   // 'revising' = submitted, then reopened by the employee: the manager can see it but not approve it until it is resubmitted.
+  // 'finance_review' = approved by the manager, waiting for Finance's second approval (reports over the threshold).
   await q(`ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_status_check;
-           ALTER TABLE reports ADD CONSTRAINT reports_status_check CHECK (status IN ('draft','submitted','revising','approved','rejected'))`);
+           ALTER TABLE reports ADD CONSTRAINT reports_status_check CHECK (status IN ('draft','submitted','revising','finance_review','approved','rejected'));
+           ALTER TABLE reports ADD COLUMN IF NOT EXISTS manager_approved_by INTEGER REFERENCES users(id);
+           ALTER TABLE reports ADD COLUMN IF NOT EXISTS manager_approved_at TIMESTAMPTZ;
+           ALTER TABLE reports ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMPTZ;
+           ALTER TABLE reports ADD COLUMN IF NOT EXISTS paid_on DATE;
+           ALTER TABLE reports ADD COLUMN IF NOT EXISTS paid_mode TEXT;
+           ALTER TABLE reports ADD COLUMN IF NOT EXISTS paid_ref TEXT;
+           ALTER TABLE reports ADD COLUMN IF NOT EXISTS paid_by INTEGER REFERENCES users(id);
+           ALTER TABLE reports ADD COLUMN IF NOT EXISTS paid_recorded_at TIMESTAMPTZ;
+           ALTER TABLE users ADD COLUMN IF NOT EXISTS delegate_id INTEGER REFERENCES users(id);
+           ALTER TABLE users ADD COLUMN IF NOT EXISTS delegate_until DATE`);
   const { rows } = await q('SELECT COUNT(*)::int AS n FROM users');
   if (rows[0].n === 0) await seedCompany();
   await ensureSecondMiddlewareEngineer();
+  await ensureLargeDemoReport();
   // Budgets are per quarter. Older databases stored monthly budgets: convert them once (x3).
   await q(`ALTER TABLE budgets ADD COLUMN IF NOT EXISTS quarterly_amount NUMERIC(14,2) CHECK (quarterly_amount >= 0);
            ALTER TABLE budgets ALTER COLUMN monthly_amount DROP NOT NULL;
@@ -169,6 +181,19 @@ async function ensureSecondMiddlewareEngineer() {
     { spent_on: daysAgo(18), merchant: 'Namma Yatri to venue', category: 'Local transport', amount: 380 },
   ]);
   console.log('Added Divya Nair (Middleware) to the demo company.');
+}
+
+// A report over ₹50,000 so the manager -> Finance second-approval flow can be demoed. Added once if missing.
+async function ensureLargeDemoReport() {
+  if ((await q(`SELECT 1 FROM reports WHERE title = 'Team offsite, Coorg'`)).rows.length) return;
+  const neha = (await q(`SELECT id FROM users WHERE email = 'neha@claimly.demo'`)).rows[0];
+  if (!neha) return;
+  await seedReport(neha.id, 'Team offsite, Coorg', 'submitted', null, [
+    { spent_on: daysAgo(5), merchant: 'Coorg resort: team offsite venue and rooms', category: 'Training & Events', amount: 38000, gst: 6840, notes: 'Backend team planning offsite, 8 people' },
+    { spent_on: daysAgo(5), merchant: 'Coach hire BLR to Coorg (return)', category: 'Travel', amount: 12500, gst: 625 },
+    { spent_on: daysAgo(4), merchant: 'Team dinner at the resort', category: 'Meals', amount: 9800, gst: 490, notes: '8 people' },
+  ]);
+  console.log('Added the Coorg offsite demo report (over ₹50,000, needs Finance second approval).');
 }
 
 async function seedCompany() {

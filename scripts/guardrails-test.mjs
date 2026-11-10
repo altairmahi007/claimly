@@ -63,7 +63,7 @@ console.log('\nMCP handshake');
 const init = await rpc(arjun.token, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
 ok(init.result?.serverInfo?.name === 'claimly', 'initialize returns serverInfo', JSON.stringify(init).slice(0, 200));
 const list = await rpc(arjun.token, 'tools/list', {});
-ok(list.result?.tools?.length === 17, `tools/list returns 17 tools (got ${list.result?.tools?.length})`);
+ok(list.result?.tools?.length === 23, `tools/list returns 23 tools (got ${list.result?.tools?.length})`);
 const bad = await fetch(`${BASE}/mcp/not-a-real-token`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' });
 ok(bad.status === 401, 'invalid MCP token -> 401');
 
@@ -201,7 +201,9 @@ ok(denied(await tool(ria.token, 'get_report', { report_id: 7 })), 'mcp: Ria cann
 console.log('\nAshish (finance): department totals only');
 const ashDash = await web(ashish.cookie, '/');
 ok(ashDash.status === 200 && /Middleware/.test(ashDash.text) && /UI/.test(ashDash.text), 'web: finance dashboard shows department totals');
-ok(!/Arjun|Neha|Karan|Divya/.test(ashDash.text), 'web: finance dashboard shows no employee names');
+const ashAnalytics = ashDash.text.slice(ashDash.text.indexOf('Department budgets'));
+ok(ashAnalytics.length > 1000 && !/Arjun|Neha|Karan|Divya/.test(ashAnalytics), 'web: finance analytics (budgets, spend, compliance, KPIs, GST) show no employee names');
+ok(/Payout queue/.test(ashDash.text) && /Waiting for your second approval/.test(ashDash.text), 'web: finance dashboard has payout queue and second-approval sections');
 ok(/Department budgets/.test(ashDash.text) && /By approving manager/.test(ashDash.text) && /Policy compliance by department/.test(ashDash.text) && /GST input credit/.test(ashDash.text), 'web: finance dashboard has budgets, by-manager, compliance and GST cards');
 ok(/Ria Sharma/.test(ashDash.text) && /Vikram Rao/.test(ashDash.text), 'web: finance sees spend by approving manager');
 
@@ -258,7 +260,9 @@ const ashDept = await tool(ashish.token, 'get_spend_summary', { group_by: 'depar
 ok(!ashDept.isError && /Middleware/.test(ashDept.text) && /"UI"/.test(ashDept.text) && !/Arjun|Neha|Karan|Divya/.test(ashDept.text), 'mcp: finance spend by department works, no names');
 ok(denied(await tool(ashish.token, 'get_spend_summary', { group_by: 'person' })), 'mcp: finance spend by person denied');
 ok(denied(await tool(ashish.token, 'get_spend_summary', { person: 'Arjun' })), 'mcp: finance spend for Arjun denied');
-ok(denied(await tool(ashish.token, 'list_reports', {})), 'mcp: finance list_reports denied');
+ok(denied(await tool(ashish.token, 'list_reports', { scope: 'mine' })), 'mcp: finance cannot list own/team reports');
+const ashList = await tool(ashish.token, 'list_reports', {});
+ok(!ashList.isError && !/Arjun|Karan|Divya/.test(ashList.text), 'mcp: finance default list = escalated reports only (none from Arjun/Karan/Divya)', ashList.text.slice(0, 300));
 ok(denied(await tool(ashish.token, 'get_report', { report_id: 1 })), 'mcp: finance get_report denied');
 ok((await tool(ashish.token, 'create_expense_report', { title: 'x', expenses: [{ date: '2026-11-01', merchant: 'x', category: 'Other', amount: 1 }] })).isError, 'mcp: finance cannot create reports');
 
@@ -283,6 +287,95 @@ ok(denied(await tool(neha.token, 'get_report', { report_id: newId })), 'mcp: Neh
 ok((await tool(arjun.token, 'submit_report', { report_id: newId })).isError === false, 'mcp: arjun submits new report');
 ok(!(await tool(ria.token, 'get_report', { report_id: newId })).isError, 'mcp: Ria sees new submitted report');
 ok(denied(await tool(vikram.token, 'get_report', { report_id: newId })), 'mcp: Vikram cannot see it');
+
+console.log('\nTwo-level approval, payouts, out of office, KPIs, MCP polish');
+const toJson = (t) => JSON.parse(t.slice(t.indexOf('\n\n') + 2));
+const nehaList = toJson((await tool(neha.token, 'list_reports', {})).text);
+const coorg = nehaList.find((r) => r.title === 'Team offsite, Coorg');
+ok(coorg && coorg.total_inr > 50000 && coorg.status === 'submitted', 'seed: Neha has a submitted report over ₹50,000');
+ok(denied(await tool(ashish.token, 'get_report', { report_id: coorg.id })), 'mcp: finance cannot see it before the manager approves');
+const r1 = await tool(ria.token, 'decide_report', { report_id: coorg.id, decision: 'approve', note: 'Planned offsite' });
+ok(!r1.isError && /sent to Finance for second approval/.test(r1.text), 'mcp: Ria approves -> sent to Finance', r1.text);
+ok(/"status": "finance_review"/.test((await tool(neha.token, 'get_report', { report_id: coorg.id })).text), 'mcp: Neha sees it waiting for Finance');
+ok(/Awaiting Finance/.test((await web(neha.cookie, `/reports/${coorg.id}`)).text), 'web: Neha sees "Awaiting Finance"');
+ok((await tool(ria.token, 'decide_report', { report_id: coorg.id, decision: 'approve' })).isError, 'mcp: Ria cannot approve twice');
+ok(denied(await tool(vikram.token, 'get_report', { report_id: coorg.id })), 'mcp: Vikram still cannot see it');
+const ashQ = await tool(ashish.token, 'list_reports', {});
+ok(/Team offsite, Coorg/.test(ashQ.text) && /finance_review/.test(ashQ.text), 'mcp: finance second-approval list has the escalated report');
+ok(!(await tool(ashish.token, 'get_report', { report_id: coorg.id })).isError, 'mcp: finance can open the escalated report');
+ok((await web(ashish.cookie, `/reports/${coorg.id}`)).status === 200 && (await web(ashish.cookie, '/reports/5')).status === 403, 'web: finance opens escalated report, still blocked from others');
+ok((await tool(ashish.token, 'decide_report', { report_id: coorg.id, decision: 'reject' })).isError, 'mcp: finance reject needs a reason');
+const fa = await tool(ashish.token, 'decide_report', { report_id: coorg.id, decision: 'approve' });
+ok(!fa.isError && /approved/.test(fa.text), 'mcp: finance gives second approval', fa.text);
+const coorgView = await tool(neha.token, 'get_report', { report_id: coorg.id });
+ok(/"manager_approval": \{\s*"by": "Ria Sharma"/.test(coorgView.text) && /"by": "Ashish Verma"/.test(coorgView.text) && /approved, waiting for payout/.test(coorgView.text), 'mcp: report shows both approvals and waiting for payout');
+ok(denied(await tool(ashish.token, 'decide_report', { report_id: 5, decision: 'approve' })), 'mcp: finance cannot decide non-escalated reports');
+
+const pq = await tool(ashish.token, 'get_payout_queue');
+ok(!pq.isError && /"payee": "Neha Iyer"/.test(pq.text) && /"amount": 60300/.test(pq.text) && !/"merchant"/.test(pq.text), 'mcp: payout queue shows payee + amount, no expense lines');
+ok(denied(await tool(ria.token, 'get_payout_queue')), 'mcp: Ria cannot see the payout queue');
+ok((await tool(ashish.token, 'mark_paid', { report_id: coorg.id, mode: 'NEFT' })).isError, 'mcp: NEFT payout needs a reference');
+ok((await tool(ashish.token, 'mark_paid', { report_id: 5, mode: 'Cash' })).isError, 'mcp: cannot pay a report that is not approved');
+const paid = await tool(ashish.token, 'mark_paid', { report_id: coorg.id, mode: 'NEFT', reference: 'UTR123456789' });
+ok(!paid.isError && /marked paid to Neha Iyer via NEFT/.test(paid.text), 'mcp: finance marks it paid', paid.text);
+ok((await tool(ashish.token, 'mark_paid', { report_id: coorg.id, mode: 'NEFT', reference: 'X' })).isError, 'mcp: cannot pay twice');
+ok(denied(await tool(ria.token, 'mark_paid', { report_id: coorg.id, mode: 'UPI', reference: 'x' })), 'mcp: Ria cannot mark paid');
+ok(/"reference": "UTR123456789"/.test((await tool(neha.token, 'get_report', { report_id: coorg.id })).text), 'mcp: Neha sees the payment reference');
+const nehaPaid = (await web(neha.cookie, `/reports/${coorg.id}`)).text;
+ok(/Paid on/.test(nehaPaid) && /UTR123456789/.test(nehaPaid), 'web: Neha sees "Paid on ..." with the UTR');
+ok(/b-paid/.test((await web(neha.cookie, '/')).text), 'web: Neha dashboard shows the Paid badge');
+const figma = 2; // seeded approved Arjun report
+const webPay = await form(ashish.cookie, `/reports/${figma}/paid`, { paid_on: new Date().toISOString().slice(0, 10), mode: 'UPI', ref: 'UPI-889911' });
+ok(webPay.status === 302, 'web: finance marks a claim paid from the payout queue');
+ok((await form(arjun.cookie, `/reports/${figma}/paid`, { mode: 'UPI', ref: 'x' })).status === 403, 'web: employee cannot mark paid');
+
+// Out of office: Ria delegates to Vikram
+const tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+const ooRep = await tool(arjun.token, 'create_expense_report', { title: 'Client lunch Chennai', submit: true, expenses: [{ date: '2026-11-05', merchant: 'Lunch, Dakshin', category: 'Meals', amount: 900 }] });
+const ooId = Number((ooRep.text.match(/report #(\d+)/) || [])[1]);
+ok(denied(await tool(vikram.token, 'get_report', { report_id: ooId })), 'mcp: before delegation Vikram cannot see Arjun report');
+ok((await tool(arjun.token, 'set_out_of_office', { delegate: 'Vikram', until: tomorrow })).isError, 'mcp: employees cannot set out of office');
+ok((await tool(ria.token, 'set_out_of_office', { delegate: 'Vikram', until: '2020-01-01' })).isError, 'mcp: delegation end date in the past refused');
+ok((await tool(ria.token, 'set_out_of_office', { delegate: 'Arjun', until: tomorrow })).isError, 'mcp: delegate must be a manager');
+const oo = await tool(ria.token, 'set_out_of_office', { delegate: 'Vikram', until: tomorrow });
+ok(!oo.isError && /Vikram Rao will handle your approvals/.test(oo.text), 'mcp: Ria delegates to Vikram', oo.text);
+const vDel = await tool(vikram.token, 'list_reports', { scope: 'delegated' });
+ok(/Client lunch Chennai/.test(vDel.text), 'mcp: Vikram sees delegated Arjun report');
+ok(/Delegated to you/.test((await web(vikram.cookie, '/')).text), 'web: Vikram dashboard shows "Delegated to you"');
+ok(denied(await tool(vikram.token, 'get_spend_summary', { person: 'Arjun' })), 'mcp: delegate still cannot see the other team spend');
+ok((await tool(vikram.token, 'update_expense', { expense_id: 1, notes: 'x' })).isError, 'mcp: delegate cannot edit lines');
+const vApp = await tool(vikram.token, 'decide_report', { report_id: ooId, decision: 'approve' });
+ok(!vApp.isError && /approved/.test(vApp.text), 'mcp: Vikram approves on behalf of Ria', vApp.text);
+ok(/on behalf of Ria Sharma/.test((await web(arjun.cookie, `/reports/${ooId}`)).text), 'web: activity log says "on behalf of Ria Sharma"');
+ok((await form(ria.cookie, '/delegate', { clear: '1' })).status === 302, 'web: Ria ends out of office');
+ok(denied(await tool(vikram.token, 'get_report', { report_id: ooId })), 'mcp: after Ria is back, Vikram is denied again');
+
+// KPIs
+const kAsh = await tool(ashish.token, 'get_kpis');
+const kj = toJson(kAsh.text);
+ok(!kAsh.isError && kj.overall.reports > 0 && kj.overall.median_approve_to_paid_days !== null && kj.by_department.some((d) => d.department === 'Middleware'), 'mcp: finance KPIs overall + by department', kAsh.text.slice(0, 400));
+const kRia = await tool(ria.token, 'get_kpis');
+ok(!kRia.isError && !/Middleware/.test(kRia.text), 'mcp: Ria KPIs cover only her team');
+ok((await tool(arjun.token, 'get_kpis')).isError, 'mcp: employees cannot see KPIs');
+ok(/Process KPIs/.test((await web(ashish.cookie, '/')).text) && /Approval KPIs/.test((await web(ria.cookie, '/')).text), 'web: KPI panels on finance and manager dashboards');
+
+// MCP polish
+const tl = (await rpc(ria.token, 'tools/list', {})).result.tools;
+const ann = (n) => tl.find((t) => t.name === n)?.annotations || {};
+ok(ann('get_report').readOnlyHint === true && ann('decide_report').destructiveHint === true && ann('add_comment').readOnlyHint === false, 'mcp: tools carry read-only / destructive annotations');
+const pl = await rpc(ria.token, 'prompts/list', {});
+ok(pl.result?.prompts?.length === 3, `mcp: 3 prompts listed (got ${pl.result?.prompts?.length})`);
+const pg = await rpc(ria.token, 'prompts/get', { name: 'approval_digest', arguments: {} });
+ok(/what_needs_my_attention/.test(pg.result?.messages?.[0]?.content?.text || ''), 'mcp: approval_digest prompt text');
+const pol = await tool(arjun.token, 'get_policy');
+ok(/second approval from Finance/.test(pol.text) && /1,500/.test(pol.text), 'mcp: get_policy returns limits and approval rules');
+const attA = await tool(ashish.token, 'what_needs_my_attention');
+ok(!attA.isError && /Approved claims to pay/.test(attA.text), 'mcp: finance attention lists payouts');
+const attR = await tool(ria.token, 'what_needs_my_attention');
+ok(!attR.isError && !/Karan|Divya/.test(attR.text), 'mcp: Ria attention stays within her team');
+ok(!(await tool(arjun.token, 'what_needs_my_attention')).isError, 'mcp: employee attention works');
+ok(/user-entered data/.test((await tool(arjun.token, 'get_report', { report_id: ooId })).text), 'mcp: report output marks user text as data, not instructions');
+ok((await web(arjun.cookie, '/policy')).status === 200 && (await web(ria.cookie, '/attention')).status === 200, 'web: policy and attention pages load');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

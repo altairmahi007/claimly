@@ -1,4 +1,4 @@
-import { CATEGORIES, FLAG_KINDS, LIMITS } from './policy.js';
+import { CATEGORIES, FLAG_KINDS, LIMITS, PAYOUT_MODES } from './policy.js';
 import { recentQuarters } from './access.js';
 
 export const esc = (s) =>
@@ -6,7 +6,9 @@ export const esc = (s) =>
 export const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 const fmtDate = (d) => (d ? new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : '');
 const ROLE = { employee: 'Employee', manager: 'Manager', finance: 'Finance' };
-const STATUS_LABEL = { revising: 'Being revised' };
+const STATUS_LABEL = { revising: 'Being revised', finance_review: 'Awaiting Finance', paid: 'Paid' };
+// A paid report is 'approved' in the database; show it as Paid.
+const statusBadge = (r) => badge(r.status === 'approved' && r.paid_on ? 'paid' : r.status);
 const badge = (s) => `<span class="badge b-${esc(s)}">${esc(STATUS_LABEL[s] || s)}</span>`;
 const viaBadge = (v) => (v === 'claude' ? '<span class="badge b-claude">via Claude</span>' : '');
 
@@ -29,7 +31,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;font
 td{padding:8px;border-bottom:1px solid #f0f1f6;vertical-align:middle}tfoot td{font-weight:700;border-top:2px solid #e6e8f0;border-bottom:0}
 td.n,th.n{text-align:right;white-space:nowrap}
 .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;text-transform:capitalize;background:#eef0f6;color:#556}
-.b-submitted{background:#fff4d6;color:#8a5a00}.b-approved{background:#dcf5e6;color:#11683a}.b-rejected{background:#fde2e2;color:#a11d1d}.b-draft{background:#eef0f6;color:#556}.b-revising{background:#e6f1ff;color:#1d4f91;text-transform:none}
+.b-submitted{background:#fff4d6;color:#8a5a00}.b-approved{background:#dcf5e6;color:#11683a}.b-rejected{background:#fde2e2;color:#a11d1d}.b-draft{background:#eef0f6;color:#556}.b-revising{background:#e6f1ff;color:#1d4f91;text-transform:none}.b-finance_review{background:#f3e8ff;color:#6b21a8;text-transform:none}.b-paid{background:#11804a;color:#fff}
 .b-claude{background:#efe7ff;color:#5b2fc9;text-transform:none}
 .flag{display:inline-block;font-size:12px;color:#a14d00;background:#fff1e0;border-radius:6px;padding:1px 7px}
 .btn{display:inline-block;border:1px solid #d6d9e6;background:#fff;color:#1c2333;border-radius:8px;padding:7px 14px;font:inherit;font-size:14px;cursor:pointer;text-decoration:none}
@@ -59,7 +61,7 @@ export function layout({ title, user, body, flash, error }) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} · Claimly</title><style>${CSS}</style></head><body>
 <header><div class="bar"><a class="logo" href="/">Claim<span>ly</span></a>
-${user ? `<nav><a href="/">Dashboard</a>${user.role === 'employee' ? '<a href="/reports/new">New report</a>' : ''}<a href="/connect">Connect Claude</a></nav>
+${user ? `<nav><a href="/">Dashboard</a>${user.role === 'employee' ? '<a href="/reports/new">New report</a>' : ''}<a href="/attention">Needs attention</a><a href="/policy">Policy</a><a href="/connect">Connect Claude</a></nav>
 <div class="me"><b>${esc(user.name)}</b><br>${ROLE[user.role]} · ${esc(user.department)}</div>
 <form method="post" action="/logout"><button class="btn sm">Log out</button></form>` : '<nav></nav>'}
 </div></header><main>
@@ -103,11 +105,15 @@ export function reviewChips(r) {
   return chips.length ? `<div class="chips">${chips.join('')}</div>` : '<span class="muted">—</span>';
 }
 
+// Days waiting for a decision; red after 3 days (the usual 2–3 business-day approval target).
+const ageChip = (r) => (['submitted', 'finance_review'].includes(r.status) && r.days_waiting != null
+  ? `<div style="margin-top:3px"><span class="chip${r.days_waiting > 3 ? ' warn" style="background:#fde2e2;color:#9a1515' : ''}">${r.days_waiting > 3 ? '⏰ overdue · ' : ''}${r.days_waiting}d waiting</span></div>` : '');
+
 export function reportsTable(rows, { showOwner = false, empty = 'No reports yet.' } = {}) {
   if (!rows.length) return `<p class="muted">${esc(empty)}</p>`;
   return `<table><thead><tr><th>Report</th>${showOwner ? '<th>Employee</th>' : ''}<th>Status</th><th>Needs attention</th><th class="n">Items</th><th class="n">Total</th></tr></thead><tbody>
 ${rows.map((r) => `<tr><td><a href="/reports/${r.id}"><b>${esc(r.title)}</b></a> ${viaBadge(r.created_via)}</td>
-${showOwner ? `<td>${esc(r.owner_name)}<div class="muted">${esc(r.department)}</div></td>` : ''}<td>${badge(r.status)}</td><td>${reviewChips(r)}</td><td class="n">${r.items}</td><td class="n">${inr(r.total)}</td></tr>`).join('')}
+${showOwner ? `<td>${esc(r.owner_name)}<div class="muted">${esc(r.department)}</div></td>` : ''}<td>${statusBadge(r)}${ageChip(r)}</td><td>${reviewChips(r)}</td><td class="n">${r.items}</td><td class="n">${inr(r.total)}</td></tr>`).join('')}
 </tbody></table>`;
 }
 
@@ -199,6 +205,43 @@ ${c.rows.map((r) => `<tr><td><b>${esc(r.department)}</b></td><td class="n">${r.r
 </tbody></table><p class="muted">Policy breaches are checked by the app (meal, hotel and pre-approval limits, future dates). Review flags are raised during review, often by Claude.</p>`;
 }
 
+// ---------- KPIs, out of office, payouts ----------
+function kpiCard(k) {
+  const d = (v) => (v == null ? '—' : `${v} d`);
+  const o = k.overall;
+  return `${kpis([['Median submit → approve', d(o.median_submit_to_approve_days)], ['Median approve → paid', d(o.median_approve_to_paid_days)], ['Reports flagged', `${o.pct_flagged ?? 0}%`], ['Sent back for revision', `${o.pct_sent_back ?? 0}%`]])}
+${k.by_department.length ? `<table><thead><tr><th>Department</th><th class="n">Reports</th><th class="n">Submit → approve</th><th class="n">Approve → paid</th><th class="n">Flagged</th><th class="n">Sent back</th></tr></thead><tbody>
+${k.by_department.map((x) => `<tr><td><b>${esc(x.department)}</b></td><td class="n">${x.reports}</td><td class="n">${d(x.median_submit_to_approve_days)}</td><td class="n">${d(x.median_approve_to_paid_days)}</td><td class="n">${x.pct_flagged}%</td><td class="n">${x.pct_sent_back}%</td></tr>`).join('')}
+</tbody></table>` : ''}<p class="muted">Reports submitted in the selected period. Medians in calendar days; target is 2–3 days to approve. Flagged = any policy breach or review flag; sent back = rejected or reopened at least once.</p>`;
+}
+
+function outOfOfficeCard(dl) {
+  if (!dl) return '';
+  const today = new Date().toISOString().slice(0, 10);
+  const covering = dl.covering_for.length ? `<div class="guard">You are covering approvals for <b>${esc(dl.covering_for.map((c) => `${c.name} (until ${c.delegate_until})`).join(', '))}</b>. Their submitted reports appear under "Delegated to you".</div>` : '';
+  const body = dl.out_of_office
+    ? `<div class="row"><span>🌴 <b>Out of office</b>: approvals go to <b>${esc(dl.out_of_office.delegate)}</b> until <b>${esc(dl.out_of_office.until)}</b>.</span><div class="spacer"></div>
+<form method="post" action="/delegate"><input type="hidden" name="clear" value="1"><button class="btn sm">I'm back</button></form></div>`
+    : `<form method="post" action="/delegate" class="row"><span>Going on leave? Delegate approvals to</span>
+<select name="delegate" required style="width:180px">${dl.managers.map((m) => `<option value="${esc(m.name)}">${esc(m.name)}</option>`).join('')}</select>
+<span>until</span><input type="date" name="until" min="${today}" required style="width:160px"><button class="btn sm">Set out of office</button></form>`;
+  return `<div class="card"><h2>Out of office</h2>${covering}${body}<p class="muted">Your delegate can approve, reject, flag and comment on your team's submitted reports while you are away (logged "on behalf of" you). They don't see your team's spend.</p></div>`;
+}
+
+function payoutCard(p) {
+  const today = new Date().toISOString().slice(0, 10);
+  const modes = PAYOUT_MODES.map((m) => `<option>${m}</option>`).join('');
+  const rows = p.unpaid.map((x) => `<tr><td><b>#${x.id}</b> ${esc(x.title)}<div class="muted">${esc(x.department)}</div></td><td>${esc(x.payee)}</td><td class="n"><b>${inr(x.amount)}</b></td>
+<td>${esc(x.approved_on)}<div class="muted">${x.days_since_approval}d ago</div></td>
+<td><form method="post" action="/reports/${x.id}/paid" class="row" style="gap:6px;flex-wrap:nowrap"><input type="date" name="paid_on" value="${today}" max="${today}" style="width:140px">
+<select name="mode" style="width:90px">${modes}</select><input name="ref" placeholder="UTR / ref" style="width:140px"><button class="btn sm g">Mark paid</button></form></td></tr>`).join('');
+  const recent = p.recently_paid.map((x) => `<li><b>#${x.id}</b> ${esc(x.payee)} · ${inr(x.amount)} · paid ${esc(x.paid_on)} via ${esc(x.paid_mode)}${x.paid_ref ? ` (${esc(x.paid_ref)})` : ''}</li>`).join('');
+  return `<div class="card"><div class="row"><h2 style="margin:0">Payout queue</h2><div class="spacer"></div><span class="muted">${p.unpaid.length} to pay · ${inr(p.total_unpaid)}</span></div><div style="height:8px"></div>
+<div class="guard">🔒 Payee name and amount only, so Finance can pay. No expense lines; the rest of Finance's view stays department-level.</div>
+${rows ? `<div style="overflow-x:auto"><table><thead><tr><th>Report</th><th>Payee</th><th class="n">Amount</th><th>Approved</th><th>Record payment</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">Nothing to pay. 🎉</p>'}
+${recent ? `<h2 style="margin-top:16px">Recently paid</h2><ul class="log">${recent}</ul>` : ''}</div>`;
+}
+
 export function employeeDashboard({ user, reports, byCategory, totals, period, show, flash, error }) {
   return layout({
     title: 'Dashboard', user, flash, error,
@@ -211,7 +254,7 @@ ${filterNote(show)}
   });
 }
 
-export function managerDashboard({ user, team, pending, all, byDept, byPerson, totals, budgets, compliance, period, show, flash, error }) {
+export function managerDashboard({ user, team, pending, all, byDept, byPerson, totals, budgets, compliance, delegated = [], delegation, kpis: kpiData, period, show, flash, error }) {
   const depts = [...new Set(team.map((t) => t.department))];
   return layout({
     title: 'Team dashboard', user, flash, error,
@@ -220,27 +263,33 @@ export function managerDashboard({ user, team, pending, all, byDept, byPerson, t
 <div class="kpis"><div class="kpi"><div class="l">Waiting for you</div><div class="v">${pending.filter((r) => r.status === 'submitted').length}</div></div>${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">Departments</div><div class="v">${esc(depts.join(', '))}</div></div></div>
 ${filterNote(show)}
 ${show.includes('pending') ? `<div class="card"><h2>Waiting for your approval</h2><p class="muted">Reports marked <b>Being revised</b> were reopened by the employee: you can read them, but approval waits until they resubmit.<br>⚠ policy = over a company limit (checked by the app) · 🔎 = issue flagged in review, e.g. by Claude · 💬 = conversation on the report</p>${reportsTable(pending, { showOwner: true, empty: 'Nothing waiting. 🎉' })}</div>` : ''}
+${delegated.length ? `<div class="card"><h2>Delegated to you</h2><p class="muted">Reports from teams whose manager is out of office and delegated approvals to you.</p>${reportsTable(delegated.filter((r) => ['submitted', 'revising'].includes(r.status)), { showOwner: true, empty: 'Nothing waiting.' })}</div>` : ''}
+${outOfOfficeCard(delegation)}
 <div class="card">${budgetHeader('Budget', budgets, { period, show })}${budgetTable(budgets)}</div>
 <div class="row" style="margin-bottom:10px"><h2 style="margin:0">Spend</h2><div class="spacer"></div>${periodTabs(period, show)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By reportee</h2>${summaryTable(byPerson, 'Person')}</div></div>
 <div class="card"><h2>Policy compliance</h2>${complianceTable(compliance)}</div>
+${kpiData ? `<div class="card"><h2>Approval KPIs</h2>${kpiCard(kpiData)}</div>` : ''}
 <div class="card"><h2>${show.length === 2 ? 'All team reports' : show[0] === 'approved' ? 'Approved team reports' : 'Pending team reports'}</h2>${reportsTable(all, { showOwner: true, empty: 'No reports with this status.' })}</div>`,
   });
 }
 
-export function financeDashboard({ user, byDept, byManager, byCategory, byMonth, totals, budgets, compliance, period, show, flash, error }) {
+export function financeDashboard({ user, byDept, byManager, byCategory, byMonth, totals, budgets, compliance, financeReview = [], payouts, kpis: kpiData, period, show, flash, error }) {
   return layout({
     title: 'Finance', user, flash, error,
     body: `<h1>Company spend</h1><p class="sub">Department-level view for Finance.</p>
-<div class="guard">🔒 Finance sees department totals only. Individual employees and their reports are hidden by design.</div>
+<div class="guard">🔒 Finance sees department totals only. Two narrow exceptions so Finance can do its job: reports over ${inr(LIMITS.financeApproval)} escalated for your second approval, and the payout queue (payee and amount only).</div>
 <div class="kpis">${statusToggles({ totals, show, period })}<div class="kpi"><div class="l">GST input credit</div><div class="v">${inr(totals.totals.gst_approved)}</div><div class="muted" style="font-size:12px">on approved spend</div></div><div class="kpi"><div class="l">Departments</div><div class="v">${byDept.rows.length}</div></div></div>
 ${filterNote(show)}
+${(() => { const w = financeReview.filter((r) => r.status === 'finance_review'); return `<div class="card"><h2>Waiting for your second approval</h2><p class="muted">Reports over ${inr(LIMITS.financeApproval)}, already approved by the manager.</p>${reportsTable(w, { showOwner: true, empty: 'Nothing waiting for Finance.' })}</div>`; })()}
+${payouts ? payoutCard(payouts) : ''}
 <div class="card">${budgetHeader('Department budgets', budgets, { period, show })}${budgetTable(budgets, { editable: true })}</div>
 <div class="row" style="margin-bottom:10px"><div class="spacer"></div>${periodTabs(period, show)}</div>
 <div class="grid"><div class="card"><h2>By department</h2>${summaryTable(byDept, 'Department')}</div>
 <div class="card"><h2>By approving manager</h2>${summaryTable(byManager, 'Manager')}<p class="muted">Spend from each manager's team. Team totals only, no individual employees.</p></div></div>
 <div class="card"><h2>Policy compliance by department</h2>${complianceTable(compliance)}</div>
+${kpiData ? `<div class="card"><h2>Process KPIs</h2>${kpiCard(kpiData)}</div>` : ''}
 <div class="grid"><div class="card"><h2>By category</h2>${summaryTable(byCategory, 'Category')}</div>
 <div class="card"><div class="row"><h2>GST input credit by month</h2><div class="spacer"></div><a class="btn sm" href="/finance/gst.csv${period !== 'all' ? `?period=${period}` : ''}">Export CSV</a></div>${summaryTable(byMonth, 'Month', { gst: true })}<p class="muted">GST credit counts approved expenses only. The CSV breaks it down by month, department and category for filing.</p></div></div>`,
   });
@@ -281,14 +330,20 @@ ${r.can.comment ? `<form method="post" action="/reports/${r.id}/comments"><texta
 }
 
 // One line under the title explaining where the report stands and who can act next.
+const fmtDay = (d) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 function statusGuard(r) {
   const first = (n) => esc(String(n || '').split(' ')[0]);
   if (r.rel === 'owner') {
     if (r.status === 'submitted') return '<div class="guard">Submitted to your manager. Need a change? Click <b>Edit report</b>: approval pauses until you resubmit.</div>';
     if (r.status === 'revising') return '<div class="guard">You are revising this report. Your manager can see it but can\'t approve it until you click <b>Resubmit for approval</b>.</div>';
-    if (r.status === 'approved') return '<div class="guard">Approved and locked.</div>';
-  } else if (r.rel === 'manager') {
+    if (r.status === 'finance_review') return `<div class="guard">Approved by ${esc(r.manager_approved_by_name || 'your manager')}. Because it is over ${inr(LIMITS.financeApproval)}, it now needs a second approval from Finance.</div>`;
+    if (r.status === 'approved' && r.paid_on) return `<div class="alert ok" style="font-size:15px">✅ <b>Paid on ${esc(fmtDay(r.paid_on))}</b> via ${esc(r.paid_mode)}${r.paid_ref ? ` · ref <code>${esc(r.paid_ref)}</code>` : ''}</div>`;
+    if (r.status === 'approved') return '<div class="guard">Approved and locked. Waiting for Finance to pay it out.</div>';
+  } else if (r.rel === 'manager' || r.rel === 'delegate') {
     if (r.status === 'revising') return `<div class="guard">${first(r.owner_name)} is revising this report. You can read it and comment; approve or reject unlocks when they resubmit.</div>`;
+    if (r.status === 'finance_review') return `<div class="guard">You approved this report. It is over ${inr(LIMITS.financeApproval)}, so it is now waiting for Finance's second approval.</div>`;
+  } else if (r.rel === 'finance') {
+    if (r.status === 'finance_review') return `<div class="guard">🔒 Escalated to Finance: over ${inr(LIMITS.financeApproval)}, approved by ${esc(r.manager_approved_by_name || 'the manager')}. Finance sees individual reports only for this second approval.</div>`;
   }
   return '';
 }
@@ -327,7 +382,7 @@ export function reportPage({ user, r, flash, error, editMode = false }) {
   actions.push(`<a class="btn" href="/reports/${r.id}/export.csv">Export CSV</a>`);
 
   const decide = r.can.decide
-    ? `<div class="card"><h2>Your decision</h2>${r.open_flags ? `<div class="alert err">${r.open_flags} open flag${r.open_flags === 1 ? '' : 's'} on this report. Read the flags and the conversation before deciding.</div>` : ''}<p class="muted">You can also correct lines above before approving. Policy limits: meals ${inr(LIMITS.mealPerItem)}/item, hotels ${inr(LIMITS.hotelPerNight)}/night.</p>
+    ? `<div class="card"><h2>${r.rel === 'finance' ? 'Finance second approval' : r.rel === 'delegate' ? `Your decision (on behalf of ${esc(r.owner_manager_name)}, out of office)` : 'Your decision'}</h2>${r.rel !== 'finance' && r.total > LIMITS.financeApproval ? `<div class="guard">This report is over ${inr(LIMITS.financeApproval)}: approving sends it to Finance for a second approval.</div>` : ''}${r.open_flags ? `<div class="alert err">${r.open_flags} open flag${r.open_flags === 1 ? '' : 's'} on this report. Read the flags and the conversation before deciding.</div>` : ''}<p class="muted">${r.rel === 'manager' ? 'You can also correct lines above before approving. ' : ''}Policy limits: meals ${inr(LIMITS.mealPerItem)}/item, hotels ${inr(LIMITS.hotelPerNight)}/night.</p>
 <form method="post" action="/reports/${r.id}/decide" class="row"><input name="note" placeholder="Comment (required to reject)" style="flex:1;min-width:220px">
 <button name="decision" value="approve" class="btn g">Approve ${inr(r.total)}</button><button name="decision" value="reject" class="btn r">Reject</button></form></div>`
     : '';
@@ -336,7 +391,7 @@ export function reportPage({ user, r, flash, error, editMode = false }) {
     title: r.title, user, flash, error,
     body: `${forms}<p class="muted"><a href="/">← Dashboard</a></p>
 <div class="row"><div><h1>${esc(r.title)} ${viaBadge(r.created_via)}</h1>
-<p class="sub">${esc(r.owner_name)} · ${esc(r.owner_department)} · ${badge(r.status)}${r.decided_by_name ? ` by ${esc(r.decided_by_name)}${r.decision_note ? `: “${esc(r.decision_note)}”` : ''}` : ''}</p></div>
+<p class="sub">${esc(r.owner_name)} · ${esc(r.owner_department)} · ${statusBadge(r)}${r.decided_by_name ? ` by ${esc(r.decided_by_name)}${r.decision_note ? `: “${esc(r.decision_note)}”` : ''}` : ''}${r.manager_approved_by_name && r.decided_by_name !== r.manager_approved_by_name ? ` <span class="muted">· manager approval: ${esc(r.manager_approved_by_name)}</span>` : ''}</p></div>
 <div class="spacer"></div><div class="row">${actions.join('')}</div></div>
 ${kpis([['Total', inr(r.total)], ['GST', inr(r.gst_total)], ['Lines', r.expenses.length], ['Needs attention', (r.flag_count + r.open_flags) ? `<span style="color:#a14d00">⚠ ${r.flag_count + r.open_flags}</span>` : '0']])}
 ${statusGuard(r)}
@@ -381,6 +436,29 @@ export function connectPage({ user, mcpUrl, flash }) {
 <li>In a new chat, open the tools menu and make sure <b>Claimly</b> is switched on.</li></ol>
 <p class="muted">Works with any MCP client that supports remote (Streamable HTTP) servers.</p></div>
 <div class="card"><h2>Try asking</h2><ul>${prompts.map((p) => `<li>“${esc(p)}”</li>`).join('')}</ul></div></div>`,
+  });
+}
+
+export function policyPage({ user, policy }) {
+  const list = (xs) => `<ul>${xs.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`;
+  return layout({
+    title: 'Expense policy', user,
+    body: `<h1>Expense policy</h1><p class="sub">Checked by Claimly on every save. Claude reads the same policy through the <code>get_policy</code> tool.</p>
+<div class="grid"><div class="card"><h2>Limits</h2>${list(policy.limits)}<p class="muted">${esc(policy.note)}</p></div>
+<div class="card"><h2>Approvals</h2>${list(policy.approvals)}<p class="muted">${esc(policy.payouts)}</p></div></div>
+<div class="card"><h2>Categories</h2><p>${policy.categories.map((c) => `<span class="chip">${esc(c)}</span>`).join(' ')}</p></div>`,
+  });
+}
+
+export function attentionPage({ user, a }) {
+  const item = (it) => `<div class="card"><div class="row"><h2 style="margin:0">${esc(it.label)}</h2><div class="spacer"></div><span class="chip warn">${it.count}</span></div>
+${it.hint ? `<p class="muted">${esc(it.hint)}</p>` : ''}
+${it.reports ? `<ul class="log">${it.reports.map((r) => `<li><a href="/reports/${r.id}"><b>#${r.id} ${esc(r.title || '')}</b></a>${r.owner ? ` · ${esc(r.owner)}` : ''}${r.payee ? ` · ${esc(r.payee)}` : ''} · ${inr(r.total_inr ?? r.amount_inr)}${r.days_waiting != null && r.status !== 'draft' ? ` · ${r.days_waiting}d waiting` : ''}${r.days_since_approval != null ? ` · approved ${r.days_since_approval}d ago` : ''}${r.open_flags ? ` · ⚠ ${r.open_flags} open flag(s)` : ''}</li>`).join('')}</ul>` : ''}
+${it.departments ? `<ul class="log">${it.departments.map((d) => `<li><b>${esc(d.department)}</b>: ${d.pct_used}% used (${esc(d.state)})</li>`).join('')}</ul>` : ''}</div>`;
+  return layout({
+    title: 'Needs attention', user,
+    body: `<h1>Needs attention</h1><p class="sub">Your to-do list in Claimly. Claude sees the same list through the <code>what_needs_my_attention</code> tool.</p>
+${a.all_clear ? '<div class="card"><p>All clear. Nothing needs you right now. 🎉</p></div>' : a.items.map(item).join('')}`,
   });
 }
 

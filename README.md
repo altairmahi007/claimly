@@ -11,9 +11,9 @@ Claimly does everything else: it stores the report, checks policy, routes it to 
 | Neha Iyer | neha@claimly.demo | Employee, **Backend** (manager: Ria) | Own reports and own spend |
 | Karan Patel | karan@claimly.demo | Employee, **Middleware** (manager: Vikram) | Own reports and own spend |
 | Divya Nair | divya@claimly.demo | Employee, **Middleware** (manager: Vikram) | Own reports and own spend |
-| Ria Sharma | ria@claimly.demo | Manager of UI + Backend | Arjun's and Neha's **submitted** reports (approve, reject, correct, flag, discuss); spend **by department and by reportee**. **Cannot** see drafts, Middleware, Karan or Divya. |
+| Ria Sharma | ria@claimly.demo | Manager of UI + Backend | Arjun's and Neha's **submitted** reports (approve, reject, correct, flag, discuss); spend **by department and by reportee**, budgets, KPIs; can set an **out-of-office delegate**. **Cannot** see drafts, Middleware, Karan or Divya. |
 | Vikram Rao | vikram@claimly.demo | Manager of Middleware | Karan's and Divya's submitted reports |
-| Ashish Verma | ashish@claimly.demo | Finance | **Department-level** spend across the company (by department, approving manager, category, month), **department budgets** (sets them), **policy compliance by department**, **GST input-credit ledger** (CSV). **Cannot** see individual employees or reports. |
+| Ashish Verma | ashish@claimly.demo | Finance | **Department-level** spend across the company (by department, approving manager, category, month), **department budgets** (sets them), **policy compliance by department**, **GST input-credit ledger** (CSV), **process KPIs**. Gives the **second approval on reports over ₹50,000** and records **payouts** (payee + amount only). **Cannot** see any other individual reports or per-person spend. |
 
 The guardrails live in `src/access.js`. The web app and the MCP tools both call the same functions, so a prompt in Claude can't get around them.
 
@@ -51,7 +51,7 @@ DATABASE_URL="postgresql://..." SESSION_SECRET="dev" npm start   # http://localh
 ```
 
 ### Guardrail tests
-Against a freshly seeded database, run 146 web + MCP access checks (each role, allowed and denied):
+Against a freshly seeded database, run 200 web + MCP access checks (each role, allowed and denied):
 ```bash
 npm run test:guardrails -- https://<your-app>.onrender.com   # or http://localhost:3000
 ```
@@ -80,6 +80,15 @@ To demo several roles, add a connector for each person (e.g. "Claimly – Arjun"
 | `get_budget_status`, `set_department_budget` | Monthly budget vs spend per department (Finance: all, sets budgets; managers: their departments) |
 | `get_compliance_summary` | Policy breaches and review flags per department, no names (Finance and managers) |
 | `get_gst_ledger` | GST input credit on approved spend by month, department and category (Finance) |
+| `what_needs_my_attention` | Role-aware to-do list: drafts / approvals with days waiting / delegated reports / second approvals / payouts / budgets near limit |
+| `get_policy` | The expense policy and approval rules, as the app enforces them |
+| `get_kpis` | Median submit→approve and approve→paid days, % flagged, % sent back (Finance: company; managers: own team) |
+| `get_payout_queue`, `mark_paid` | Finance pays approved claims (mode + UTR/reference); the employee sees "Paid on …" |
+| `set_out_of_office` | A manager hands approvals to another manager until a date (logged "on behalf of") |
+
+All tools carry read-only / destructive annotations. Three MCP prompts are included: **File my expenses**, **Approvals digest** (managers) and **Finance close**. Tool results mark titles, merchants, notes and comments as user-entered data, never instructions.
+
+**Approval flow:** employee submits → manager approves (or their out-of-office delegate) → reports over ₹50,000 go to **Finance for a second approval** → Finance records the **payout** (mode + UTR) and the employee sees "Paid on …".
 
 Drafts are private: managers only see a report once it has been submitted. Reports open read-only with an **Edit** button. If the employee edits a submitted report (on the web or through Claude), it becomes **Being revised**: the manager can still read it and comment, but can't approve or reject it until the employee resubmits. It still counts as pending spend. Every report page has a **Flags** section (the app's policy checks plus issues raised in review, often by Claude) and a **Conversation** thread; the approval queue shows both as chips.
 

@@ -2,11 +2,15 @@
 // Claude never decides who can see what; the app does.
 //
 //   Employee : own reports and own spend only.
-//   Manager  : own direct reportees' reports (view, edit while submitted, approve/reject)
-//              and spend by department / by reportee, for their own team only.
-//   Finance  : department-level totals across the company. No individual reports, no per-person spend.
+//   Manager  : own direct reportees' submitted reports (view, correct, approve/reject) and spend by
+//              department / by reportee for their own team only. While a manager is out of office, the
+//              colleague they delegate to can review and decide those reports (logged "on behalf of").
+//   Finance  : department-level totals across the company, never per-person spend. Two narrow,
+//              deliberate exceptions so finance can do its job: (1) reports over the second-approval
+//              threshold that are escalated to finance, and (2) the payout queue (payee, amount, dates).
 
 import { q } from './db.js';
+import { LIMITS } from './policy.js';
 
 export class AppError extends Error {
   constructor(message, status = 403) {
@@ -15,26 +19,38 @@ export class AppError extends Error {
   }
 }
 
-const USER_COLS = 'id, name, email, role, department, title, manager_id, mcp_token, password_hash';
+const USER_COLS = 'id, name, email, role, department, title, manager_id, mcp_token, password_hash, delegate_id, delegate_until';
 export const getUserById = async (id) => (await q(`SELECT ${USER_COLS} FROM users WHERE id=$1`, [id])).rows[0] || null;
 export const getUserByEmail = async (email) => (await q(`SELECT ${USER_COLS} FROM users WHERE lower(email)=lower($1)`, [email])).rows[0] || null;
 export const getUserByToken = async (token) => (await q(`SELECT ${USER_COLS} FROM users WHERE mcp_token=$1`, [token])).rows[0] || null;
 export const getTeam = async (managerId) =>
   (await q(`SELECT id, name, department, title FROM users WHERE manager_id=$1 ORDER BY department, name`, [managerId])).rows;
 
+// Managers who have delegated their approvals to `userId` right now (out of office until a date, inclusive).
+export const ACTIVE_DELEGATION = `delegate_until >= (now() AT TIME ZONE 'Asia/Kolkata')::date`;
+export const getDelegators = async (userId) =>
+  (await q(`SELECT id, name, delegate_until FROM users WHERE delegate_id = $1 AND ${ACTIVE_DELEGATION} ORDER BY name`, [userId])).rows;
+
 export function describeAccess(user, team = []) {
-  if (user.role === 'employee') return 'You can create, edit and submit your own expense reports, and see your own spend.';
+  if (user.role === 'employee') return 'You can create, edit and submit your own expense reports, see your own spend and see when approved claims are paid.';
   if (user.role === 'manager') {
     const depts = [...new Set(team.map((t) => t.department))];
-    return `You can see and approve reports from your direct reportees (${team.map((t) => t.name).join(', ') || 'none'}) and see spend for your departments (${depts.join(', ') || 'none'}), by department or by person, plus your departments' budgets and policy compliance. You cannot see other teams.`;
+    return `You can see and approve reports from your direct reportees (${team.map((t) => t.name).join(', ') || 'none'}) and see spend for your departments (${depts.join(', ') || 'none'}), by department or by person, plus your departments' budgets, compliance and KPIs. You can set an out-of-office delegate, and review reports delegated to you. You cannot see other teams. Reports over ₹${LIMITS.financeApproval.toLocaleString('en-IN')} go to Finance for a second approval after yours.`;
   }
-  return 'You can see department-level spend across the company (by department, approving manager, category or month), set quarterly department budgets, track policy compliance by department and pull the GST input-credit ledger. Individual reports and per-person spend are hidden from Finance by design.';
+  return `You can see department-level spend across the company (by department, approving manager, category or month), set quarterly department budgets, track policy compliance and KPIs, and pull the GST ledger. You also give the second approval on reports over ₹${LIMITS.financeApproval.toLocaleString('en-IN')} and record payouts from the payout queue. Other individual reports and per-person spend are hidden from Finance by design.`;
 }
 
-// Managers see a reportee's report only once it has been submitted: drafts are private to the employee.
-function relation(user, ownerId, ownerManagerId, status) {
-  if (ownerId === user.id) return 'owner';
-  if (user.role === 'manager' && ownerManagerId === user.id && status !== 'draft') return 'manager';
+// Who is this user to the report?
+//   owner    : filed it
+//   manager  : owner's manager, once submitted (drafts are private)
+//   delegate : a manager covering for the owner's manager while they are out of office
+//   finance  : finance, only for reports escalated for second approval
+function relation(user, r) {
+  if (r.owner_id === user.id) return 'owner';
+  if (r.status === 'draft') return null;
+  if (user.role === 'manager' && r.owner_manager_id === user.id) return 'manager';
+  if (user.role === 'manager' && r.manager_delegate_id === user.id && r.delegation_active) return 'delegate';
+  if (user.role === 'finance' && r.escalated_at) return 'finance';
   return null;
 }
 
@@ -43,34 +59,40 @@ export async function loadReportFor(user, reportId) {
   if (!Number.isInteger(id)) throw new AppError('Report not found.', 404);
   const r = (await q(
     `SELECT r.*, u.name AS owner_name, u.department AS owner_department, u.manager_id AS owner_manager_id,
-            d.name AS decided_by_name
+            m.name AS owner_manager_name, m.delegate_id AS manager_delegate_id,
+            (m.${ACTIVE_DELEGATION}) AS delegation_active,
+            d.name AS decided_by_name, ma.name AS manager_approved_by_name, pb.name AS paid_by_name
        FROM reports r JOIN users u ON u.id = r.owner_id
+       LEFT JOIN users m ON m.id = u.manager_id
        LEFT JOIN users d ON d.id = r.decided_by
+       LEFT JOIN users ma ON ma.id = r.manager_approved_by
+       LEFT JOIN users pb ON pb.id = r.paid_by
       WHERE r.id = $1`,
     [id]
   )).rows[0];
   if (!r) throw new AppError('Report not found.', 404);
 
-  const rel = relation(user, r.owner_id, r.owner_manager_id, r.status);
+  const rel = relation(user, r);
   if (!rel) {
-    if (user.role === 'finance') throw new AppError('Finance can only see department-level totals, not individual expense reports.');
+    if (user.role === 'finance') throw new AppError('Access denied: Finance sees department-level totals only. Individual reports are visible to Finance only when escalated for second approval.');
     // Same message for another team's report and a reportee's draft: reveal neither whose it is nor that it exists.
     if (user.role === 'manager') throw new AppError('Access denied: managers can only see reports that their direct reportees have submitted.');
     throw new AppError('You can only see your own expense reports.');
   }
   r.rel = rel;
+  const reviewer = rel === 'manager' || rel === 'delegate';
   r.can = {
     // Owners edit drafts, rejected and 'being revised' reports. A submitted report must be reopened first
     // (start_edit), which moves it to 'revising' so the manager can't approve half-edited data.
-    // Managers can correct lines while a report waits for them. Approved reports are locked for everyone.
+    // The manager can correct lines while a report waits for them. Approved reports are locked for everyone.
     edit: (rel === 'owner' && ['draft', 'rejected', 'revising'].includes(r.status)) || (rel === 'manager' && r.status === 'submitted'),
     start_edit: rel === 'owner' && r.status === 'submitted',
     submit: rel === 'owner' && ['draft', 'rejected', 'revising'].includes(r.status),
-    decide: rel === 'manager' && r.status === 'submitted',
+    decide: (reviewer && r.status === 'submitted') || (rel === 'finance' && r.status === 'finance_review'),
     delete: rel === 'owner' && r.status === 'draft',
     comment: true,
     flag: r.status !== 'approved',
-    resolve_flag: rel === 'manager' && r.status === 'submitted',
+    resolve_flag: (reviewer && r.status === 'submitted') || (rel === 'finance' && r.status === 'finance_review'),
   };
   return r;
 }
@@ -88,8 +110,8 @@ const sameName = (full, asked) => {
   return full.toLowerCase() === a || full.split(' ')[0].toLowerCase() === a;
 };
 
-// Approved / Pending filter (the dashboard boxes). Pending = submitted or being revised.
-export const STATUS_FILTERS = { approved: ['approved'], pending: ['submitted', 'revising'] };
+// Approved / Pending filter (the dashboard boxes). Pending = submitted, being revised or waiting for Finance.
+export const STATUS_FILTERS = { approved: ['approved'], pending: ['submitted', 'revising', 'finance_review'] };
 export function dbStatuses(statuses) {
   const keys = (statuses && statuses.length ? statuses : ['approved', 'pending']).filter((k) => STATUS_FILTERS[k]);
   if (!keys.length) throw new AppError('statuses must include "approved" and/or "pending".', 400);
@@ -153,7 +175,7 @@ export async function spendSummary(user, { group_by = 'category', department, pe
   const { rows } = await q(
     `SELECT ${groupExpr} AS grp,
             COALESCE(SUM(e.amount) FILTER (WHERE r.status = 'approved'), 0)  AS approved,
-            COALESCE(SUM(e.amount) FILTER (WHERE r.status IN ('submitted','revising')), 0) AS pending,
+            COALESCE(SUM(e.amount) FILTER (WHERE r.status IN ('submitted','revising','finance_review')), 0) AS pending,
             SUM(e.amount) AS total,
             COALESCE(SUM(e.gst) FILTER (WHERE r.status = 'approved'), 0) AS gst_approved,
             COUNT(*)::int AS items
@@ -224,7 +246,7 @@ export async function budgetStatus(user, { quarter, statuses } = {}) {
   const spend = (await q(
     `SELECT u.department AS dept,
             COALESCE(SUM(e.amount) FILTER (WHERE r.status = 'approved'), 0) AS approved,
-            COALESCE(SUM(e.amount) FILTER (WHERE r.status IN ('submitted','revising')), 0) AS pending
+            COALESCE(SUM(e.amount) FILTER (WHERE r.status IN ('submitted','revising','finance_review')), 0) AS pending
        FROM expenses e JOIN reports r ON r.id = e.report_id JOIN users u ON u.id = r.owner_id
       WHERE ${where.join(' AND ')} GROUP BY u.department`,
     params
@@ -315,4 +337,52 @@ export async function gstLedger(user, { from, to } = {}) {
       GROUP BY 1, 2, 3 ORDER BY 1 DESC, 2, 3`,
     params
   )).rows;
+}
+
+// ---------- Process KPIs (Finance: company and by department; managers: own team) ----------
+// submit -> final approval days, approval -> payment days, % of reports flagged, % sent back for revision.
+export async function kpiSummary(user, { from, to } = {}) {
+  if (user.role === 'employee') throw new AppError('KPIs are visible to managers and Finance only.');
+  const { where, params, p, scope } = await scopeFor(user, {});
+  where.push(`r.status <> 'draft'`, 'r.submitted_at IS NOT NULL');
+  if (from) where.push(`r.submitted_at >= ${p(from)}`);
+  if (to) where.push(`r.submitted_at < (${p(to)}::date + 1)`);
+  const { rows } = await q(
+    `WITH base AS (
+       SELECT r.id, u.department, r.status, r.submitted_at, r.decided_at, r.paid_on,
+              (EXISTS (SELECT 1 FROM expenses e WHERE e.report_id = r.id AND e.policy_flag IS NOT NULL)
+               OR EXISTS (SELECT 1 FROM flags f WHERE f.report_id = r.id)) AS flagged,
+              EXISTS (SELECT 1 FROM activity a WHERE a.report_id = r.id
+                       AND (a.action LIKE 'Reopened for editing%' OR a.action LIKE 'Rejected%')) AS sent_back
+         FROM reports r JOIN users u ON u.id = r.owner_id
+        WHERE ${where.join(' AND ')})
+     SELECT department, GROUPING(department) AS is_total,
+            COUNT(*)::int AS reports,
+            COUNT(*) FILTER (WHERE status = 'approved')::int AS approved,
+            COUNT(*) FILTER (WHERE paid_on IS NOT NULL)::int AS paid,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (decided_at - submitted_at)) / 86400)
+              FILTER (WHERE status = 'approved' AND decided_at IS NOT NULL) AS median_submit_to_approve_days,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY (paid_on - (decided_at AT TIME ZONE 'Asia/Kolkata')::date))
+              FILTER (WHERE paid_on IS NOT NULL AND decided_at IS NOT NULL) AS median_approve_to_paid_days,
+            ROUND(100.0 * AVG(flagged::int))::int AS pct_flagged,
+            ROUND(100.0 * AVG(sent_back::int))::int AS pct_sent_back
+       FROM base
+      GROUP BY GROUPING SETS ((department), ())
+      ORDER BY GROUPING(department), department`,
+    params
+  );
+  const fmt = (x) => ({
+    reports: x.reports, approved: x.approved, paid: x.paid,
+    median_submit_to_approve_days: x.median_submit_to_approve_days == null ? null : Math.round(Number(x.median_submit_to_approve_days) * 10) / 10,
+    median_approve_to_paid_days: x.median_approve_to_paid_days == null ? null : Math.round(Number(x.median_approve_to_paid_days) * 10) / 10,
+    pct_flagged: x.pct_flagged, pct_sent_back: x.pct_sent_back,
+  });
+  const total = rows.find((x) => x.is_total) || { reports: 0, approved: 0, paid: 0, pct_flagged: 0, pct_sent_back: 0 };
+  return {
+    scope,
+    filters: { from: from || null, to: to || null },
+    overall: fmt(total),
+    by_department: rows.filter((x) => !x.is_total).map((x) => ({ department: x.department, ...fmt(x) })),
+    note: 'Reports submitted in the period (drafts excluded). Flagged = any policy breach or review flag. Sent back = rejected or reopened for editing at least once. Days are calendar days; medians ignore reports not yet approved / paid.',
+  };
 }
