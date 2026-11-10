@@ -226,7 +226,8 @@ export function reportPage({ user, r, flash, error }) {
 <p class="sub">${esc(r.owner_name)} · ${esc(r.owner_department)} · ${badge(r.status)}${r.decided_by_name ? ` by ${esc(r.decided_by_name)}${r.decision_note ? `: “${esc(r.decision_note)}”` : ''}` : ''}</p></div>
 <div class="spacer"></div><div class="row">${actions.join('')}</div></div>
 ${kpis([['Total', inr(r.total)], ['GST', inr(r.gst_total)], ['Lines', r.expenses.length], ['Needs attention', (r.flag_count + r.open_flags) ? `<span style="color:#a14d00">⚠ ${r.flag_count + r.open_flags}</span>` : '0']])}
-${r.rel === 'owner' && r.can.edit && r.status === 'draft' ? `<form method="post" action="/reports/${r.id}/rename" class="row" style="margin-bottom:14px"><input name="title" value="${esc(r.title)}" style="max-width:360px"><button class="btn sm">Rename</button></form>` : ''}
+${r.rel === 'owner' && r.status === 'submitted' ? '<div class="guard">Submitted to your manager. You can still correct it until it is approved; every change is logged.</div>' : ''}
+${r.rel === 'owner' && r.can.edit ? `<form method="post" action="/reports/${r.id}/rename" class="row" style="margin-bottom:14px"><input name="title" value="${esc(r.title)}" style="max-width:360px"><button class="btn sm">Rename</button></form>` : ''}
 ${r.rel === 'manager' && r.can.edit ? '<div class="guard">You are reviewing as manager: you can correct lines before approving. Changes are logged.</div>' : ''}
 ${flagsCard(r)}
 <div class="card"><table><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th class="n">Amount</th><th class="n">GST</th><th>${editable ? 'Notes / policy' : 'Policy'}</th><th></th></tr></thead>

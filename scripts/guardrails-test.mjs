@@ -144,8 +144,19 @@ ok(denied(await tool(arjun.token, 'resolve_flag', { flag_id: flagId })), 'mcp: A
 ok(denied(await tool(vikram.token, 'resolve_flag', { flag_id: flagId })), 'mcp: Vikram cannot resolve Ria team flags');
 ok(!(await tool(ria.token, 'resolve_flag', { flag_id: flagId, note: 'Explained in conversation' })).isError, 'mcp: Ria resolves the flag');
 ok((await tool(ria.token, 'decide_report', { report_id: 1, decision: 'reject' })).isError, 'mcp: reject without reason refused');
+const ownEdit = await tool(arjun.token, 'update_expense', { expense_id: 5, notes: 'Dinner with 3 client stakeholders' });
+ok(!ownEdit.isError, 'mcp: Arjun edits his submitted report #1', ownEdit.text);
+ok(!(await tool(arjun.token, 'add_expenses', { report_id: 1, expenses: [{ date: '2026-11-01', merchant: 'Airport parking', category: 'Local transport', amount: 200 }] })).isError, 'mcp: Arjun adds a line to submitted #1');
+ok(/Dinner with 3 client stakeholders/.test((await tool(ria.token, 'get_report', { report_id: 1 })).text), 'mcp: Ria sees Arjun\'s correction');
+ok(/still correct it until it is approved/.test((await web(arjun.cookie, '/reports/1')).text), 'web: Arjun sees submitted report is still editable');
+ok(denied(await tool(neha.token, 'update_expense', { expense_id: 5, notes: 'x' })), 'mcp: Neha cannot edit Arjun line');
 const appr = await tool(ria.token, 'decide_report', { report_id: 1, decision: 'approve' });
 ok(!appr.isError && /approved/.test(appr.text), 'mcp: Ria approves Arjun #1');
+const lockedOwner = await tool(arjun.token, 'update_expense', { expense_id: 5, notes: 'changed after approval' });
+ok(lockedOwner.isError && /approved/.test(lockedOwner.text), 'mcp: Arjun cannot edit #1 once approved');
+ok((await tool(arjun.token, 'add_expenses', { report_id: 1, expenses: [{ date: '2026-11-01', merchant: 'x', category: 'Other', amount: 1 }] })).isError, 'mcp: Arjun cannot add lines once approved');
+ok((await tool(ria.token, 'update_expense', { expense_id: 5, notes: 'x' })).isError, 'mcp: Ria cannot edit #1 once approved');
+ok((await form(arjun.cookie, '/expenses/5', { spent_on: '2026-11-01', merchant: 'x', category: 'Meals', amount: '1' })).status === 403, 'web: Arjun cannot edit an approved line');
 
 console.log('\nVikram (manager of Karan)');
 ok((await web(vikram.cookie, '/reports/5')).status === 200, 'web: Vikram opens Karan #5');

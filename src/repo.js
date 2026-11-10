@@ -166,7 +166,7 @@ export async function deleteExpense(user, expenseId, via = 'web') {
 
 export async function renameReport(user, reportId, title, via = 'web') {
   const r = await loadReportFor(user, reportId);
-  if (r.rel !== 'owner' || !r.can.edit) throw new AppError('Only the owner can rename a draft or rejected report.');
+  if (r.rel !== 'owner' || !r.can.edit) throw new AppError('Only the owner can rename a report, and only until it is approved.');
   const t = String(title ?? '').trim().slice(0, 140);
   if (!t) throw new AppError('Title is required.', 400);
   await tx(async (client) => {

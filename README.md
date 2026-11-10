@@ -51,7 +51,7 @@ DATABASE_URL="postgresql://..." SESSION_SECRET="dev" npm start   # http://localh
 ```
 
 ### Guardrail tests
-Against a freshly seeded database, run 92 web + MCP access checks (each role, allowed and denied):
+Against a freshly seeded database, run 101 web + MCP access checks (each role, allowed and denied):
 ```bash
 npm run test:guardrails -- https://<your-app>.onrender.com   # or http://localhost:3000
 ```
@@ -69,7 +69,7 @@ To demo several roles, add a connector for each person (e.g. "Claimly – Arjun"
 |---|---|
 | `whoami` | Who is connected, their role, team and exactly what they can access |
 | `create_expense_report` | Claude extracts expense lines from receipts or SMS and saves a report (optionally submits it) |
-| `add_expenses`, `update_expense`, `delete_expense` | Edit lines (owner: draft/rejected; manager: submitted) |
+| `add_expenses`, `update_expense`, `delete_expense` | Edit lines (owner: until approved; manager: while submitted). Approved reports are locked. |
 | `list_reports`, `get_report` | Read reports within the caller's scope |
 | `submit_report` | Owner sends the report to their manager |
 | `decide_report` | Manager approves or rejects (reason required to reject) |

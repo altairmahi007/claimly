@@ -123,7 +123,7 @@ export function buildMcpServer(user, baseUrl) {
     'add_expenses',
     {
       title: 'Add expenses to a report',
-      description: 'Add more expense lines to an existing report (owner: while draft/rejected).',
+      description: 'Add more expense lines to an existing report. Owners can do this until the report is approved (draft, submitted or rejected).',
       inputSchema: { report_id: z.number().int(), expenses: z.array(Expense).min(1).max(100) },
     },
     run(async ({ report_id, expenses }) => {
@@ -137,7 +137,7 @@ export function buildMcpServer(user, baseUrl) {
     'update_expense',
     {
       title: 'Edit an expense line',
-      description: 'Change fields of one expense line. Owners can edit draft/rejected reports; managers can correct lines on submitted reports from their reportees.',
+      description: 'Change fields of one expense line. Owners can edit their report until it is approved (draft, submitted or rejected); managers can correct lines on submitted reports from their reportees. Approved reports are locked.',
       inputSchema: {
         expense_id: z.number().int(),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),

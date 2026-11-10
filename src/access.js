@@ -60,7 +60,8 @@ export async function loadReportFor(user, reportId) {
   }
   r.rel = rel;
   r.can = {
-    edit: (rel === 'owner' && ['draft', 'rejected'].includes(r.status)) || (rel === 'manager' && r.status === 'submitted'),
+    // Owners can keep editing until the report is approved; managers can correct lines while it waits for them.
+    edit: (rel === 'owner' && r.status !== 'approved') || (rel === 'manager' && r.status === 'submitted'),
     submit: rel === 'owner' && ['draft', 'rejected'].includes(r.status),
     decide: rel === 'manager' && r.status === 'submitted',
     delete: rel === 'owner' && r.status === 'draft',
