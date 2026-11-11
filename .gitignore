@@ -6,3 +6,4 @@ node_modules
 .env.local
 research_notes/
 reports/
+docs/.guide.html
